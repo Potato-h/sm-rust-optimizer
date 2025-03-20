@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::fmt::{self, Write};
+use std::fs::File;
+use std::io::read_to_string;
 
 use daggy::{Dag, NodeIndex};
 use either::Either::{self, Left, Right};
@@ -7,6 +10,7 @@ use itertools::Itertools;
 use petgraph::dot::Config::GraphContentOnly;
 use petgraph::visit::{EdgeRef, IntoNodeReferences, NodeRef};
 use petgraph::{dot::Dot, Graph};
+use Inst::*;
 
 type Ident = String;
 
@@ -56,9 +60,21 @@ type ArgStackOffset = usize;
 
 #[derive(Debug, Clone)]
 struct DataGraph {
+    start_label: String,
     dag: Dag<DataVertex, ArgStackOffset>,
     inputs: Vec<NodeIndex>,
     outputs: Vec<NodeIndex>,
+}
+
+impl DataGraph {
+    fn info_label(&self) -> String {
+        format!(
+            "{}\\linputs: {}\\loutputs: {}",
+            self.start_label,
+            self.inputs.len(),
+            self.outputs.len()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +86,7 @@ enum JumpCondition {
 
 #[derive(Debug, Clone)]
 enum DataVertex {
+    Symbolic(Ident),
     StackVar(usize),
     OpResult(LinInst),
 }
@@ -115,9 +132,14 @@ impl VirtualStack {
 
 type FlowGraph = Graph<DataGraph, JumpCondition>;
 
-fn compile_lin_block(code: Vec<LinInst>) -> DataGraph {
+fn inst_node(dag: &mut Dag<DataVertex, ArgStackOffset>, inst: LinInst) -> NodeIndex {
+    dag.add_node(DataVertex::OpResult(inst))
+}
+
+fn compile_lin_block(start_label: String, code: Vec<LinInst>) -> DataGraph {
     let mut dag = Dag::new();
     let mut stack = VirtualStack::new();
+    let mut symbolic: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
 
     fn n_arity_inst(
         dag: &mut Dag<DataVertex, usize>,
@@ -125,7 +147,7 @@ fn compile_lin_block(code: Vec<LinInst>) -> DataGraph {
         n: usize,
         inst: LinInst,
     ) {
-        let node = dag.add_node(DataVertex::OpResult(inst.clone()));
+        let node = inst_node(dag, inst);
 
         for i in 0..n {
             let arg = stack.pop().right_or_else(|var| dag.add_node(var));
@@ -136,11 +158,22 @@ fn compile_lin_block(code: Vec<LinInst>) -> DataGraph {
     }
 
     for inst in code {
+        // Assume, that all of the instructions consume stack values, aside from ST
         match inst {
             LinInst::Const(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::Elem => n_arity_inst(&mut dag, &mut stack, 2, inst),
-            LinInst::Store(_) => todo!(),
-            LinInst::Load(_) => todo!(),
+            LinInst::Store(ref name) => {
+                let node = inst_node(&mut dag, inst.clone());
+                symbolic.insert(name.clone(), node);
+            }
+            LinInst::Load(ref name) => {
+                if !symbolic.contains_key(name) {
+                    let node = dag.add_node(DataVertex::Symbolic(name.clone()));
+                    symbolic.insert(name.clone(), node);
+                }
+
+                stack.push(symbolic[name]);
+            }
             LinInst::Call(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
@@ -159,11 +192,13 @@ fn compile_lin_block(code: Vec<LinInst>) -> DataGraph {
         .node_references()
         .filter_map(|(i, typ)| match typ {
             DataVertex::StackVar(_) => Some(i),
+            DataVertex::Symbolic(_) => Some(i),
             DataVertex::OpResult(_) => None,
         })
         .collect();
 
     DataGraph {
+        start_label,
         dag,
         inputs,
         outputs: stack.stack,
@@ -186,9 +221,10 @@ fn compile_function(code: Vec<Inst>) -> FlowGraph {
         .collect();
 
     let linear_blocks = flow_insts.iter().cloned().tuple_windows();
-    // .filter(|(a, b)| b - a > 1);
 
     for (prev_flow, end) in linear_blocks {
+        eprintln!("handle block from {} to {end}", prev_flow + 1);
+
         let start = prev_flow + 1;
         let block = code[start..end]
             .iter()
@@ -198,7 +234,13 @@ fn compile_function(code: Vec<Inst>) -> FlowGraph {
             })
             .collect();
 
-        let block = compile_lin_block(block);
+        let start_label = match &code[prev_flow] {
+            Inst::LinInst(_) => unreachable!(),
+            Inst::FlowInst(FlowInst::Label(label)) => label.clone(),
+            _ => format!("line {}", prev_flow + 1),
+        };
+
+        let block = compile_lin_block(start_label, block);
         let node = graph.add_node(block);
 
         if let Inst::FlowInst(FlowInst::Label(id)) = &code[prev_flow] {
@@ -281,11 +323,11 @@ where
 
 fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result {
     writeln!(w, "subgraph cluster_{label} {{")?;
-    writeln!(w, "label = \"{label}\";")?;
+    writeln!(w, "label = \"{}\";", graph.info_label())?;
     writeln!(w, "style = filled;")?;
     writeln!(w, "color = lightgrey;")?;
-    writeln!(w, "sub{label}_input;")?;
-    writeln!(w, "sub{label}_output;")?;
+    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
+    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
 
     for node in graph.inputs.iter() {
         writeln!(w, "sub{label}_input -> sub{label}{};", node.index())?;
@@ -298,7 +340,15 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
     for node in graph.dag.graph().node_indices() {
         write!(w, "sub{label}{} [label = \"", node.index(),)?;
         write!(Escaper(&mut *w), "{:?}", &graph.dag[node])?;
-        writeln!(w, "\"];")?;
+        writeln!(
+            w,
+            "\" {}];",
+            if graph.outputs.contains(&node) {
+                "color = red"
+            } else {
+                ""
+            }
+        )?;
     }
 
     for edge in graph.dag.graph().edge_references() {
@@ -316,7 +366,8 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
 }
 
 fn function_graph<W: Write>(w: &mut W, graph: &FlowGraph) -> fmt::Result {
-    writeln!(w, "digraph {{")?;
+    writeln!(w, "digraph G {{")?;
+    writeln!(w, "compound = true;")?;
 
     for block in graph.node_indices() {
         let label = block.index().to_string();
@@ -326,10 +377,12 @@ fn function_graph<W: Write>(w: &mut W, graph: &FlowGraph) -> fmt::Result {
     for edge in graph.edge_references() {
         writeln!(
             w,
-            "sub{}_output -> sub{}_input [label = \"{:?}\"]",
+            "sub{}_output -> sub{}_input [label = \"{:?}\" ltail = cluster_{} lhead=cluster_{}]",
             edge.source().index(),
             edge.target().index(),
-            edge.weight()
+            edge.weight(),
+            edge.source().index(),
+            edge.target().index(),
         )?;
     }
 
@@ -337,34 +390,153 @@ fn function_graph<W: Write>(w: &mut W, graph: &FlowGraph) -> fmt::Result {
     Ok(())
 }
 
-fn main() {
-    // let code = Vec::from([
-    //     LinInst::Const(10),
-    //     LinInst::BinOp(Op::Plus),
-    //     LinInst::BinOp(Op::Minus),
-    //     LinInst::Const(20),
-    //     LinInst::Call(String::from("foo"), 3),
-    //     LinInst::Dup,
-    //     LinInst::SExp(String::from("tag"), 2),
-    // ]);
+fn const_i(v: i32) -> Inst {
+    LinInst(LinInst::Const(v))
+}
 
-    let code = Vec::from([
-        Inst::FlowInst(FlowInst::Begin),
-        Inst::LinInst(LinInst::Const(10)),
-        Inst::LinInst(LinInst::Const(20)),
-        Inst::LinInst(LinInst::BinOp(Op::Plus)),
-        Inst::FlowInst(FlowInst::Jmp(JumpMode::NonZero, String::from("nonzero"))),
-        Inst::LinInst(LinInst::SExp(String::from("Foo"), 3)),
-        Inst::FlowInst(FlowInst::Jmp(JumpMode::Unconditional, String::from("exit"))),
-        Inst::FlowInst(FlowInst::Label(String::from("nonzero"))),
-        Inst::LinInst(LinInst::SExp(String::from("Bar"), 3)),
-        Inst::FlowInst(FlowInst::Label(String::from("exit"))),
-        Inst::FlowInst(FlowInst::End),
-    ]);
+fn bin_op(op: Op) -> Inst {
+    LinInst(LinInst::BinOp(op))
+}
 
+fn jmp(mode: JumpMode, label: &str) -> Inst {
+    FlowInst(FlowInst::Jmp(mode, label.to_string()))
+}
+
+fn elem() -> Inst {
+    LinInst(LinInst::Elem)
+}
+
+fn label(l: &str) -> Inst {
+    FlowInst(FlowInst::Label(l.to_string()))
+}
+
+fn dup() -> Inst {
+    LinInst(LinInst::Dup)
+}
+
+fn drop_i() -> Inst {
+    LinInst(LinInst::Drop)
+}
+
+fn load(l: &str) -> Inst {
+    LinInst(LinInst::Load(l.to_string()))
+}
+
+fn store(l: &str) -> Inst {
+    LinInst(LinInst::Store(l.to_string()))
+}
+
+fn tag(t: &str, n: usize) -> Inst {
+    LinInst(LinInst::Tag(t.to_string(), n))
+}
+
+fn sexp(t: &str, n: usize) -> Inst {
+    LinInst(LinInst::SExp(t.to_string(), n))
+}
+
+fn linear_example() -> Vec<LinInst> {
+    Vec::from([
+        LinInst::Const(10),
+        LinInst::BinOp(Op::Plus),
+        LinInst::BinOp(Op::Minus),
+        LinInst::Const(20),
+        LinInst::Call(String::from("foo"), 3),
+        LinInst::Dup,
+        LinInst::SExp(String::from("tag"), 2),
+    ])
+}
+
+fn simple_example() -> Vec<Inst> {
+    Vec::from([
+        FlowInst(FlowInst::Begin),            // 0
+        const_i(10),                          // 1
+        const_i(20),                          // 2
+        bin_op(Op::Plus),                     // 3
+        jmp(JumpMode::NonZero, "nonzero"),    // 4
+        sexp("Foo", 3),                       // 5
+        jmp(JumpMode::Unconditional, "exit"), // 6
+        label("nonzero"),                     // 7
+        sexp("Bar", 3),                       // 8
+        label("exit"),                        // 9
+        const_i(1),                           // 10
+        elem(),                               // 11
+        FlowInst(FlowInst::End),              // 12
+    ])
+}
+
+fn parse_stack_code(code: &str) -> Vec<Inst> {
+    code.lines()
+        .map(|line| {
+            let mut tokens = line
+                .split(|ch| match ch {
+                    ',' | '(' | ')' => true,
+                    _ if ch.is_whitespace() => true,
+                    _ => false,
+                })
+                .filter(|token| !token.is_empty());
+
+            match tokens.next() {
+                Some("BEGIN") => FlowInst(FlowInst::Begin),
+                Some("END") => FlowInst(FlowInst::End),
+                Some("LD") => {
+                    let place = tokens.next().unwrap().to_string();
+                    LinInst(LinInst::Load(place))
+                }
+                Some("ST") => {
+                    let place = tokens.next().unwrap().to_string();
+                    LinInst(LinInst::Load(place))
+                }
+                Some("DUP") => LinInst(LinInst::Dup),
+                Some("DROP") => LinInst(LinInst::Drop),
+                Some("LABEL") => {
+                    let label = tokens.next().unwrap().to_string();
+                    FlowInst(FlowInst::Label(label))
+                }
+                Some("CONST") => {
+                    let value = tokens.next().unwrap().parse().unwrap();
+                    LinInst(LinInst::Const(value))
+                }
+                Some("JMP") => {
+                    let label = tokens.next().unwrap().to_string();
+                    FlowInst(FlowInst::Jmp(JumpMode::Unconditional, label))
+                }
+                Some("CJMP") => {
+                    let mode = match tokens.next() {
+                        Some("z") => JumpMode::Zero,
+                        Some("nz") => JumpMode::NonZero,
+                        _ => panic!("unknown jump command"),
+                    };
+
+                    let label = tokens.next().unwrap().to_string();
+                    FlowInst(FlowInst::Jmp(mode, label))
+                }
+                Some("ELEM") => LinInst(LinInst::Elem),
+                Some("PATT") => {
+                    let _ = tokens.next();
+                    let tag = tokens
+                        .next()
+                        .and_then(|s| s.strip_prefix('\"'))
+                        .and_then(|s| s.strip_suffix('\"'))
+                        .unwrap();
+
+                    let num = tokens.next().unwrap().parse().unwrap();
+                    LinInst(LinInst::Tag(tag.to_string(), num))
+                }
+                Some("SEXP") => todo!(),
+                Some("CALL") => todo!(),
+                _ => panic!("unknown command"),
+            }
+        })
+        .collect()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let content = read_to_string(File::open("head.sm")?)?;
+    let code = parse_stack_code(&content);
     let output = compile_function(code);
-
     let mut buffer = String::new();
     function_graph(&mut buffer, &output).unwrap();
     println!("{buffer}");
+
+    Ok(())
 }
