@@ -53,6 +53,9 @@ enum LinInst {
 enum FlowInst {
     Jmp(JumpMode, Ident),
     Label(Ident),
+    // call command should be in flow graph, because it can cause
+    // arbitrary change of global variables. And after unfolding it can
+    // have control flow instruction which weird to extract from lin block
     Call(Ident, usize),
     Ret,
     Begin,
@@ -176,7 +179,6 @@ fn inst_vertex(inst: &LinInst) -> DataVertex {
     DataVertex::OpResult(inst.clone())
 }
 
-// TODO: probably want assert, that graph is trully acyclic
 fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) -> DataGraph {
     let mut dag = StableGraph::new();
     let mut stack = VirtualStack::new();
@@ -221,10 +223,6 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
 
                 stack.push(symbolic[name]);
             }
-            // TODO: call command should be in flow graph, because it can cause
-            // arbitrary change of global variables. And after unfolding it can
-            // have control flow instruction which weird to extract from lin block
-            // LinInst::Call(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
             LinInst::SExp(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
@@ -327,18 +325,17 @@ impl FlowGraph {
         self.eliminate_dead_code();
     }
 
-    // TODO: make separate block for CALL operations
-    // TODO: fill outputs
+    // TODO: fill all outputs (is RET operation a early return or something else?)
     fn analyze_function(code: Vec<Inst>) -> Self {
         let mut edges: Vec<(NodeIndex, Label, JumpCondition)> = Vec::new();
         let mut edge_from_prev: Option<(NodeIndex, JumpCondition)> = None;
         let mut block: Vec<LinInst> = Vec::new();
         let mut graph = StableGraph::new();
         let mut labeled: Option<Label> = None;
-        let mut block_indexes = Vec::new(); // only purpose is to find input block
+        let mut block_indexes = Vec::new(); // only purpose is to find input and outputs blocks
         let mut from_label_to_block: BTreeMap<Label, NodeIndex> = BTreeMap::new();
 
-        // skip(1) for Begin
+        // skip(1) for Begin operation
         for (i, inst) in code.into_iter().enumerate().skip(1) {
             match inst {
                 Inst::LinInst(inst) => {
@@ -390,7 +387,7 @@ impl FlowGraph {
         FlowGraph {
             graph,
             input: block_indexes[0],
-            outputs: Vec::new(),
+            outputs: block_indexes.last().into_iter().cloned().collect(),
         }
     }
 }
@@ -666,6 +663,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
         .collect()
 }
 
+// TODO: make cli
 fn main() -> Result<(), Box<dyn Error>> {
     let content = read_to_string(File::open("concat.sm")?)?;
     let code = parse_stack_code(&content);
