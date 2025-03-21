@@ -131,7 +131,9 @@ impl VirtualStack {
     }
 }
 
-type FlowGraph = StableGraph<DataGraph, JumpCondition>;
+struct FlowGraph {
+    graph: StableGraph<DataGraph, JumpCondition>,
+}
 
 fn inst_vertex(inst: &LinInst) -> DataVertex {
     DataVertex::OpResult(inst.clone())
@@ -353,7 +355,7 @@ fn analyze_function(code: Vec<Inst>) -> FlowGraph {
         }
     }
 
-    graph
+    FlowGraph { graph }
 }
 
 struct Escaper<W>(W);
@@ -431,16 +433,16 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
     Ok(())
 }
 
-fn function_graph<W: Write>(w: &mut W, graph: &FlowGraph) -> fmt::Result {
+fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
     writeln!(w, "digraph G {{")?;
     writeln!(w, "compound = true;")?;
 
-    for block in graph.node_indices() {
+    for block in flow.graph.node_indices() {
         let label = block.index().to_string();
-        subgraph(w, &label, &graph[block])?;
+        subgraph(w, &label, &flow.graph[block])?;
     }
 
-    for edge in graph.edge_references() {
+    for edge in flow.graph.edge_references() {
         writeln!(
             w,
             "sub{}_output -> sub{}_input [label = \"{:?}\" ltail = cluster_{} lhead=cluster_{}]",
@@ -618,7 +620,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let code = parse_stack_code(&content);
     let mut output = analyze_function(code);
 
-    for block in output.node_weights_mut() {
+    for block in output.graph.node_weights_mut() {
         block.eliminate_dead_code();
     }
 
