@@ -19,6 +19,16 @@ enum JumpMode {
     NonZero,
 }
 
+impl JumpMode {
+    fn rev(self) -> Self {
+        match self {
+            JumpMode::Unconditional => JumpMode::Unconditional,
+            JumpMode::Zero => JumpMode::NonZero,
+            JumpMode::NonZero => JumpMode::Zero,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Op {
     Plus,
@@ -47,6 +57,16 @@ enum FlowInst {
     Ret,
     Begin,
     End,
+}
+
+impl FlowInst {
+    fn conditional_jmp(&self) -> bool {
+        match self {
+            FlowInst::Jmp(JumpMode::NonZero, _) => true,
+            FlowInst::Jmp(JumpMode::Zero, _) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +102,16 @@ enum JumpCondition {
     Unconditional,
     Zero,
     NonZero,
+}
+
+impl From<JumpMode> for JumpCondition {
+    fn from(value: JumpMode) -> Self {
+        match value {
+            JumpMode::Unconditional => JumpCondition::Unconditional,
+            JumpMode::Zero => JumpCondition::Zero,
+            JumpMode::NonZero => JumpCondition::NonZero,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -267,109 +297,7 @@ impl DataGraph {
     }
 }
 
-// TODO: make separate block for CALL operations
-// TODO: fill outputs
-fn analyze_function(code: Vec<Inst>) -> FlowGraph {
-    let mut graph = StableGraph::new();
-    let mut by_label: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
-    let mut by_line: BTreeMap<usize, NodeIndex> = BTreeMap::new();
-    let mut block_endings: Vec<(NodeIndex, FlowInst, usize)> = Vec::new();
-
-    let flow_insts: Vec<_> = code
-        .iter()
-        .enumerate()
-        .filter_map(|(i, inst)| match inst {
-            Inst::LinInst(_) => None,
-            Inst::FlowInst(_) => Some(i),
-        })
-        .collect();
-
-    let linear_blocks = flow_insts.iter().cloned().tuple_windows();
-    let mut input = None;
-
-    for (i, (prev_flow, end)) in linear_blocks.enumerate() {
-        eprintln!("handle block from {} to {end}", prev_flow + 1);
-
-        let start = prev_flow + 1;
-        let block = code[start..end]
-            .iter()
-            .filter_map(|inst| match inst {
-                Inst::LinInst(lin_inst) => Some(lin_inst.clone()),
-                Inst::FlowInst(_) => None,
-            })
-            .collect();
-
-        let start_label = match &code[prev_flow] {
-            Inst::LinInst(_) => unreachable!(),
-            Inst::FlowInst(FlowInst::Label(label)) => label.clone(),
-            _ => format!("line {}", prev_flow + 1),
-        };
-
-        let block = analyze_lin_block(
-            start_label,
-            block,
-            matches!(code[end], Inst::FlowInst(FlowInst::Jmp(mode, _)) if mode != JumpMode::Unconditional),
-        );
-
-        let node = graph.add_node(block);
-
-        if i == 0 {
-            input = Some(node);
-        }
-
-        if let Inst::FlowInst(FlowInst::Label(id)) = &code[prev_flow] {
-            by_label.insert(id.clone(), node);
-        }
-
-        by_line.insert(start, node);
-
-        let final_instruction = match &code[end] {
-            Inst::FlowInst(flow_inst) => flow_inst.clone(),
-            Inst::LinInst(_) => unreachable!(),
-        };
-
-        block_endings.push((node, final_instruction, end));
-    }
-
-    for (node, ending, end_line) in block_endings {
-        match ending {
-            FlowInst::Jmp(jump_mode, label) => {
-                let jump_cont = by_label[&label];
-                let jump_condition = match jump_mode {
-                    JumpMode::Unconditional => JumpCondition::Unconditional,
-                    JumpMode::Zero => JumpCondition::Zero,
-                    JumpMode::NonZero => JumpCondition::NonZero,
-                };
-
-                graph.add_edge(node, jump_cont, jump_condition);
-
-                match jump_mode {
-                    JumpMode::Zero => {
-                        let (_, fallthrough_cont) = by_line.range(end_line..).next().unwrap();
-                        graph.add_edge(node, *fallthrough_cont, JumpCondition::NonZero);
-                    }
-                    JumpMode::NonZero => {
-                        let (_, fallthrough_cont) = by_line.range(end_line..).next().unwrap();
-                        graph.add_edge(node, *fallthrough_cont, JumpCondition::Zero);
-                    }
-                    _ => {}
-                }
-            }
-            FlowInst::Label(label) => {
-                let cont = by_label[&label];
-                graph.add_edge(node, cont, JumpCondition::Unconditional);
-            }
-            FlowInst::Ret => todo!(),
-            _ => {}
-        }
-    }
-
-    FlowGraph {
-        graph,
-        input: input.unwrap(),
-        outputs: Vec::new(),
-    }
-}
+type Label = String;
 
 impl FlowGraph {
     fn eliminate_dead_code(&mut self) {
@@ -389,6 +317,69 @@ impl FlowGraph {
         }
 
         self.eliminate_dead_code();
+    }
+
+    // TODO: make separate block for CALL operations
+    // TODO: fill outputs
+    fn analyze_function(code: Vec<Inst>) -> Self {
+        let mut edges: Vec<(NodeIndex, Label, JumpCondition)> = Vec::new();
+        let mut edge_from_prev: Option<(NodeIndex, JumpCondition)> = None;
+        let mut block: Vec<LinInst> = Vec::new();
+        let mut graph = StableGraph::new();
+        let mut labeled: Option<Label> = None;
+        let mut block_indexes = Vec::new(); // only purpose is to find input block
+        let mut from_label_to_block: BTreeMap<Label, NodeIndex> = BTreeMap::new();
+
+        // skip(1) for Begin
+        for (i, inst) in code.into_iter().enumerate().skip(1) {
+            match inst {
+                Inst::LinInst(inst) => {
+                    block.push(inst);
+                }
+                Inst::FlowInst(inst) => {
+                    let start_label = labeled.take().unwrap_or(format!("Line_{i}"));
+                    let has_cjmp = inst.conditional_jmp();
+                    let this_block =
+                        analyze_lin_block(start_label.clone(), block.drain(..).collect(), has_cjmp);
+
+                    let node = graph.add_node(this_block);
+                    from_label_to_block.insert(start_label, node);
+                    block_indexes.push(node);
+
+                    if let Some((prev, cond)) = edge_from_prev.take() {
+                        graph.add_edge(prev, node, cond);
+                    }
+
+                    match inst {
+                        FlowInst::Jmp(JumpMode::Unconditional, label) => {
+                            edges.push((node, label, JumpCondition::Unconditional));
+                        }
+                        FlowInst::Jmp(jump_mode, label) => {
+                            edges.push((node, label, jump_mode.into()));
+                            edge_from_prev = Some((node, jump_mode.rev().into()))
+                        }
+                        FlowInst::Label(label) => {
+                            edge_from_prev = Some((node, JumpCondition::Unconditional));
+                            labeled = Some(label);
+                        }
+                        FlowInst::Call(_, _) => todo!(),
+                        FlowInst::Ret => todo!(),
+                        FlowInst::Begin => continue,
+                        FlowInst::End => break,
+                    }
+                }
+            }
+        }
+
+        for (from, to, cond) in edges {
+            graph.add_edge(from, from_label_to_block[&to], cond);
+        }
+
+        FlowGraph {
+            graph,
+            input: block_indexes[0],
+            outputs: Vec::new(),
+        }
     }
 }
 
@@ -652,7 +643,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
 fn main() -> Result<(), Box<dyn Error>> {
     let content = read_to_string(File::open("head.sm")?)?;
     let code = parse_stack_code(&content);
-    let mut output = analyze_function(code);
+    let mut output = FlowGraph::analyze_function(code);
     output.optimize();
     let mut buffer = String::new();
     function_graph(&mut buffer, &output).unwrap();
