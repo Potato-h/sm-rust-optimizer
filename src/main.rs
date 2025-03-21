@@ -261,8 +261,8 @@ impl DataGraph {
             .filter(|id| !outputs.contains(id))
             .find(|id| self.dag.edges_directed(*id, Direction::Outgoing).count() == 0)
         {
-            // TODO: probably should remove sink from inputs, if necessary
             self.dag.remove_node(sink);
+            self.inputs.retain(|&x| x != sink);
         }
     }
 }
