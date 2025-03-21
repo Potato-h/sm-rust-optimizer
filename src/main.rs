@@ -161,8 +161,13 @@ impl VirtualStack {
     }
 }
 
+enum FlowVertex {
+    LinearBlock(DataGraph),
+    Call(String, usize),
+}
+
 struct FlowGraph {
-    graph: StableGraph<DataGraph, JumpCondition>,
+    graph: StableGraph<FlowVertex, JumpCondition>,
     input: NodeIndex,
     outputs: Vec<NodeIndex>,
 }
@@ -313,7 +318,10 @@ impl FlowGraph {
 
     fn optimize(&mut self) {
         for block in self.graph.node_weights_mut() {
-            block.eliminate_dead_code();
+            match block {
+                FlowVertex::LinearBlock(graph) => graph.eliminate_dead_code(),
+                FlowVertex::Call(_, _) => {}
+            }
         }
 
         self.eliminate_dead_code();
@@ -342,7 +350,7 @@ impl FlowGraph {
                     let this_block =
                         analyze_lin_block(start_label.clone(), block.drain(..).collect(), has_cjmp);
 
-                    let node = graph.add_node(this_block);
+                    let node = graph.add_node(FlowVertex::LinearBlock(this_block));
                     from_label_to_block.insert(start_label, node);
                     block_indexes.push(node);
 
@@ -362,7 +370,11 @@ impl FlowGraph {
                             edge_from_prev = Some((node, JumpCondition::Unconditional));
                             labeled = Some(label);
                         }
-                        FlowInst::Call(_, _) => todo!(),
+                        FlowInst::Call(name, args) => {
+                            let call_node = graph.add_node(FlowVertex::Call(name, args));
+                            graph.add_edge(node, call_node, JumpCondition::Unconditional);
+                            edge_from_prev = Some((call_node, JumpCondition::Unconditional));
+                        }
                         FlowInst::Ret => todo!(),
                         FlowInst::Begin => continue,
                         FlowInst::End => break,
@@ -458,13 +470,27 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
     Ok(())
 }
 
+fn call_subgraph<W: Write>(w: &mut W, label: &str, name: &str, args: usize) -> fmt::Result {
+    writeln!(w, "subgraph cluster_{label} {{")?;
+    writeln!(w, "label = \"call ({}, {})\";", name, args)?;
+    writeln!(w, "style = filled;")?;
+    writeln!(w, "color = lightgrey;")?;
+    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
+    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
+    writeln!(w, "}}")?;
+    Ok(())
+}
+
 fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
     writeln!(w, "digraph G {{")?;
     writeln!(w, "compound = true;")?;
 
     for block in flow.graph.node_indices() {
         let label = block.index().to_string();
-        subgraph(w, &label, &flow.graph[block])?;
+        match &flow.graph[block] {
+            FlowVertex::LinearBlock(graph) => subgraph(w, &label, graph)?,
+            FlowVertex::Call(name, args) => call_subgraph(w, &label, &name, *args)?,
+        }
     }
 
     for edge in flow.graph.edge_references() {
@@ -641,7 +667,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let content = read_to_string(File::open("head.sm")?)?;
+    let content = read_to_string(File::open("concat.sm")?)?;
     let code = parse_stack_code(&content);
     let mut output = FlowGraph::analyze_function(code);
     output.optimize();
