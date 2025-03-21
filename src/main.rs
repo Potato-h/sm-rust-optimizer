@@ -133,6 +133,8 @@ impl VirtualStack {
 
 struct FlowGraph {
     graph: StableGraph<DataGraph, JumpCondition>,
+    input: NodeIndex,
+    outputs: Vec<NodeIndex>,
 }
 
 fn inst_vertex(inst: &LinInst) -> DataVertex {
@@ -266,6 +268,7 @@ impl DataGraph {
 }
 
 // TODO: make separate block for CALL operations
+// TODO: fill outputs
 fn analyze_function(code: Vec<Inst>) -> FlowGraph {
     let mut graph = StableGraph::new();
     let mut by_label: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
@@ -282,8 +285,9 @@ fn analyze_function(code: Vec<Inst>) -> FlowGraph {
         .collect();
 
     let linear_blocks = flow_insts.iter().cloned().tuple_windows();
+    let mut input = None;
 
-    for (prev_flow, end) in linear_blocks {
+    for (i, (prev_flow, end)) in linear_blocks.enumerate() {
         eprintln!("handle block from {} to {end}", prev_flow + 1);
 
         let start = prev_flow + 1;
@@ -306,7 +310,12 @@ fn analyze_function(code: Vec<Inst>) -> FlowGraph {
             block,
             matches!(code[end], Inst::FlowInst(FlowInst::Jmp(mode, _)) if mode != JumpMode::Unconditional),
         );
+
         let node = graph.add_node(block);
+
+        if i == 0 {
+            input = Some(node);
+        }
 
         if let Inst::FlowInst(FlowInst::Label(id)) = &code[prev_flow] {
             by_label.insert(id.clone(), node);
@@ -355,7 +364,32 @@ fn analyze_function(code: Vec<Inst>) -> FlowGraph {
         }
     }
 
-    FlowGraph { graph }
+    FlowGraph {
+        graph,
+        input: input.unwrap(),
+        outputs: Vec::new(),
+    }
+}
+
+impl FlowGraph {
+    fn eliminate_dead_code(&mut self) {
+        while let Some(source) = self
+            .graph
+            .node_indices()
+            .filter(|&id| id != self.input)
+            .find(|&id| self.graph.edges_directed(id, Direction::Incoming).count() == 0)
+        {
+            self.graph.remove_node(source);
+        }
+    }
+
+    fn optimize(&mut self) {
+        for block in self.graph.node_weights_mut() {
+            block.eliminate_dead_code();
+        }
+
+        self.eliminate_dead_code();
+    }
 }
 
 struct Escaper<W>(W);
@@ -619,11 +653,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let content = read_to_string(File::open("head.sm")?)?;
     let code = parse_stack_code(&content);
     let mut output = analyze_function(code);
-
-    for block in output.graph.node_weights_mut() {
-        block.eliminate_dead_code();
-    }
-
+    output.optimize();
     let mut buffer = String::new();
     function_graph(&mut buffer, &output).unwrap();
     println!("{buffer}");
