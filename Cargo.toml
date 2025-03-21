@@ -5,6 +5,5 @@ edition = "2021"
 
 [dependencies]
 petgraph = "*"
-daggy = "*"
 either = "*"
 itertools = "*"
