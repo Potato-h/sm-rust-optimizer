@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Write};
 use std::fs::File;
 use std::io::read_to_string;
+use std::mem;
 
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
@@ -64,11 +65,10 @@ enum FlowInst {
 
 impl FlowInst {
     fn conditional_jmp(&self) -> bool {
-        match self {
-            FlowInst::Jmp(JumpMode::NonZero, _) => true,
-            FlowInst::Jmp(JumpMode::Zero, _) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            FlowInst::Jmp(JumpMode::NonZero, _) | FlowInst::Jmp(JumpMode::Zero, _)
+        )
     }
 }
 
@@ -155,7 +155,7 @@ impl VirtualStack {
 
     fn peek(&self) -> Either<DataVertex, NodeIndex> {
         match self.stack.last() {
-            Some(v) => Right(v.clone()),
+            Some(&v) => Right(v),
             None => {
                 let tail = self.tail_from;
                 Left(DataVertex::StackVar(tail))
@@ -298,6 +298,14 @@ impl DataGraph {
             self.inputs.retain(|&x| x != sink);
         }
     }
+
+    fn constant_propagation(&mut self) {
+        todo!()
+    }
+
+    fn optimize(&mut self) {
+        self.eliminate_dead_code();
+    }
 }
 
 type Label = String;
@@ -317,7 +325,7 @@ impl FlowGraph {
     fn optimize(&mut self) {
         for block in self.graph.node_weights_mut() {
             match block {
-                FlowVertex::LinearBlock(graph) => graph.eliminate_dead_code(),
+                FlowVertex::LinearBlock(graph) => graph.optimize(),
                 FlowVertex::Call(_, _) => {}
             }
         }
@@ -345,7 +353,7 @@ impl FlowGraph {
                     let start_label = labeled.take().unwrap_or(format!("Line_{i}"));
                     let has_cjmp = inst.conditional_jmp();
                     let this_block =
-                        analyze_lin_block(start_label.clone(), block.drain(..).collect(), has_cjmp);
+                        analyze_lin_block(start_label.clone(), mem::take(&mut block), has_cjmp);
 
                     let node = graph.add_node(FlowVertex::LinearBlock(this_block));
                     from_label_to_block.insert(start_label, node);
@@ -486,7 +494,7 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
         let label = block.index().to_string();
         match &flow.graph[block] {
             FlowVertex::LinearBlock(graph) => subgraph(w, &label, graph)?,
-            FlowVertex::Call(name, args) => call_subgraph(w, &label, &name, *args)?,
+            FlowVertex::Call(name, args) => call_subgraph(w, &label, name, *args)?,
         }
     }
 
@@ -504,80 +512,6 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
 
     writeln!(w, "}}")?;
     Ok(())
-}
-
-fn const_i(v: i32) -> Inst {
-    LinInst(LinInst::Const(v))
-}
-
-fn bin_op(op: Op) -> Inst {
-    LinInst(LinInst::BinOp(op))
-}
-
-fn jmp(mode: JumpMode, label: &str) -> Inst {
-    FlowInst(FlowInst::Jmp(mode, label.to_string()))
-}
-
-fn elem() -> Inst {
-    LinInst(LinInst::Elem)
-}
-
-fn label(l: &str) -> Inst {
-    FlowInst(FlowInst::Label(l.to_string()))
-}
-
-fn dup() -> Inst {
-    LinInst(LinInst::Dup)
-}
-
-fn drop_i() -> Inst {
-    LinInst(LinInst::Drop)
-}
-
-fn load(l: &str) -> Inst {
-    LinInst(LinInst::Load(l.to_string()))
-}
-
-fn store(l: &str) -> Inst {
-    LinInst(LinInst::Store(l.to_string()))
-}
-
-fn tag(t: &str, n: usize) -> Inst {
-    LinInst(LinInst::Tag(t.to_string(), n))
-}
-
-fn sexp(t: &str, n: usize) -> Inst {
-    LinInst(LinInst::SExp(t.to_string(), n))
-}
-
-fn linear_example() -> Vec<LinInst> {
-    Vec::from([
-        LinInst::Const(10),
-        LinInst::BinOp(Op::Plus),
-        LinInst::BinOp(Op::Minus),
-        LinInst::Const(20),
-        LinInst::SExp(String::from("foo"), 3),
-        LinInst::Dup,
-        LinInst::SExp(String::from("tag"), 2),
-    ])
-}
-
-fn simple_example() -> Vec<Inst> {
-    Vec::from([
-        FlowInst(FlowInst::Begin),            // 0
-        const_i(10),                          // 1
-        const_i(20),                          // 2
-        bin_op(Op::Plus),                     // 3
-        jmp(JumpMode::NonZero, "nonzero"),    // 4
-        sexp("Foo", 3),                       // 5
-        jmp(JumpMode::Unconditional, "exit"), // 6
-        label("nonzero"),                     // 7
-        sexp("Bar", 3),                       // 8
-        label("exit"),                        // 9
-        const_i(1),                           // 10
-        elem(),                               // 11
-        FlowInst(FlowInst::End),              // 12
-    ])
 }
 
 fn parse_stack_code(code: &str) -> Vec<Inst> {
