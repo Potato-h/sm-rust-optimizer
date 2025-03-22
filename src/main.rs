@@ -108,6 +108,7 @@ struct DataGraph {
     dag: StableGraph<DataVertex, ArgStackOffset>,
     inputs: Vec<NodeIndex>,
     outputs: Vec<NodeIndex>,
+    symbolics: BTreeMap<Ident, NodeIndex>,
     jump_decided_by: Option<NodeIndex>,
 }
 
@@ -204,7 +205,7 @@ fn inst_vertex(inst: &LinInst) -> DataVertex {
 fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) -> DataGraph {
     let mut dag = StableGraph::new();
     let mut stack = VirtualStack::new();
-    let mut symbolic: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
+    let mut symbolics: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
 
     fn n_arity_inst(
         dag: &mut StableGraph<DataVertex, usize>,
@@ -235,15 +236,15 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
                 let node = dag.add_node(inst_vertex(&inst));
                 let from = stack.peek().right_or_else(|var| dag.add_node(var));
                 dag.add_edge(from, node, 0);
-                symbolic.insert(name.clone(), node);
+                symbolics.insert(name.clone(), node);
             }
             LinInst::Load(ref name) => {
-                if !symbolic.contains_key(name) {
+                if !symbolics.contains_key(name) {
                     let node = dag.add_node(DataVertex::Symbolic(name.clone()));
-                    symbolic.insert(name.clone(), node);
+                    symbolics.insert(name.clone(), node);
                 }
 
-                stack.push(symbolic[name]);
+                stack.push(symbolics[name]);
             }
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
@@ -292,6 +293,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         dag,
         inputs,
         outputs: stack.stack,
+        symbolics,
         jump_decided_by,
     }
 }
@@ -321,6 +323,9 @@ impl DataGraph {
         }
     }
 
+    /// Replace node with new value and saves *only* outgoing edges from this node.
+    /// All incoming edges deleted. Replaces all entries of this node in special nodes (stack outputs,
+    /// symbolics, jump decision variable) with new node.
     fn replace_node_for_outgoings(&mut self, node: NodeIndex, new_node: DataVertex) -> NodeIndex {
         let new_node = self.dag.add_node(new_node);
 
@@ -345,6 +350,11 @@ impl DataGraph {
         if self.jump_decided_by.is_some_and(|jmp| jmp == node) {
             self.jump_decided_by = Some(new_node);
         }
+
+        self.symbolics
+            .values_mut()
+            .filter(|s| **s == node)
+            .for_each(|s| *s = new_node);
 
         self.dag.remove_node(node);
 
