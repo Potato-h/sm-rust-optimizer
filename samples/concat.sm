@@ -1,0 +1,47 @@
+BEGIN LA_concat, 2, 3, 0
+LD arg[0]
+ST loc[0]
+DROP
+LD loc[0]
+LABEL L30, 0
+DUP
+CONST 0
+BINOP ==
+CJMP z, L8
+DROP
+LD arg[1]
+JMP L6
+LABEL L8, 0
+DUP
+PATT Tag ("cons", 2)
+CJMP z, L7
+DUP
+CONST 0
+ELEM
+DROP
+DUP
+CONST 1
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 1
+ELEM
+ST loc[1]
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[2]
+DROP
+LD loc[2]
+LD loc[1]
+LD arg[1]
+CALL LA_concat, 2
+SEXP "cons", 2
+JMP L6
+LABEL L7_drop_1, 0
+DROP
+LABEL L7, 0
+LABEL L6, 0
+END

@@ -1,0 +1,15 @@
+BEGIN LConst_prop_example_example, 2, 0, 0
+CONST 50
+CONST 30
+BINOP *
+CONST 400
+BINOP -
+CONST 30
+CONST 20
+BINOP *
+BINOP +
+LD arg[0]
+BINOP *
+LD arg[1]
+BINOP +
+END
