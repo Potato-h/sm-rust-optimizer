@@ -4,7 +4,9 @@ use std::fmt::{self, Write};
 use std::fs::File;
 use std::io::read_to_string;
 use std::mem;
+use std::path::PathBuf;
 
+use clap::Parser;
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
@@ -84,6 +86,13 @@ impl FlowInst {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DataGraphOptimFlags {
+    dead_code_elim: bool,
+    const_prop: bool,
+    tag_eval: bool,
+}
+
 #[derive(Debug, Clone)]
 enum Inst {
     LinInst(LinInst),
@@ -92,6 +101,7 @@ enum Inst {
 
 type ArgStackOffset = usize;
 
+// TODO: aside from outputs on stack, should store symbolics
 #[derive(Debug, Clone)]
 struct DataGraph {
     start_label: String,
@@ -398,11 +408,20 @@ impl DataGraph {
         }
     }
 
-    fn optimize(&mut self) {
-        self.eliminate_dead_code();
-        self.constant_propagation();
-        self.tag_check_evaluation();
-        self.eliminate_dead_code();
+    fn optimize(&mut self, flags: DataGraphOptimFlags) {
+        if flags.dead_code_elim {
+            self.eliminate_dead_code();
+        }
+
+        if flags.const_prop {
+            self.constant_propagation();
+            self.eliminate_dead_code();
+        }
+
+        if flags.tag_eval {
+            self.tag_check_evaluation();
+            self.eliminate_dead_code();
+        }
     }
 }
 
@@ -420,10 +439,10 @@ impl FlowGraph {
         }
     }
 
-    fn optimize(&mut self) {
+    fn optimize(&mut self, block_optim: DataGraphOptimFlags) {
         for block in self.graph.node_weights_mut() {
             match block {
-                FlowVertex::LinearBlock(graph) => graph.optimize(),
+                FlowVertex::LinearBlock(graph) => graph.optimize(block_optim),
                 FlowVertex::Call(_, _) => {}
             }
         }
@@ -698,15 +717,54 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
         .collect()
 }
 
-// TODO: make cli
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Filepath to stack machine code (.sm)
+    #[arg(short, long)]
+    source: PathBuf,
+
+    /// Eliminate dead code
+    #[arg(short, long, default_value_t = false)]
+    elim_dead_code: bool,
+
+    /// Propagate constant
+    #[arg(short, long, default_value_t = false)]
+    const_prop: bool,
+
+    /// Replace tag check on known tag with constant
+    #[arg(short, long, default_value_t = false)]
+    tag_check_eval: bool,
+
+    #[arg(short = 'O', long, default_value_t = false)]
+    optim_full: bool,
+}
+
+fn data_flags_from_args(args: &Args) -> DataGraphOptimFlags {
+    if args.optim_full {
+        DataGraphOptimFlags {
+            dead_code_elim: true,
+            const_prop: true,
+            tag_eval: true,
+        }
+    } else {
+        DataGraphOptimFlags {
+            dead_code_elim: args.elim_dead_code,
+            const_prop: args.const_prop,
+            tag_eval: args.tag_check_eval,
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let content = read_to_string(File::open("const_prop_example.sm")?)?;
+    let args = Args::parse();
+    let data_flags = data_flags_from_args(&args);
+    let content = read_to_string(File::open(args.source)?)?;
     let code = parse_stack_code(&content);
     let mut output = FlowGraph::analyze_function(code);
-    output.optimize();
+    output.optimize(data_flags);
     let mut buffer = String::new();
     function_graph(&mut buffer, &output).unwrap();
     println!("{buffer}");
-
     Ok(())
 }
