@@ -1,0 +1,21 @@
+BEGIN LJump_on_const_example, 2, 0, 0
+CONST 100
+CONST 200
+CONST 2
+BINOP *
+BINOP +
+CONST 450
+BINOP -
+CONST 0
+BINOP >
+CJMP z, L4
+LD arg[0]
+LD arg[1]
+BINOP +
+JMP L2
+LABEL L4, 0
+LD arg[0]
+LD arg[1]
+BINOP -
+LABEL L2, 0
+END

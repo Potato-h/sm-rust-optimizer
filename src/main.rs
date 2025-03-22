@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoEdgesDirected, IntoNodeReferences};
 use petgraph::{algo, prelude::*};
 use Inst::*;
 
@@ -38,6 +38,7 @@ enum Op {
     Minus,
     Mul,
     Eq,
+    Gt,
 }
 
 impl Op {
@@ -47,6 +48,7 @@ impl Op {
             Op::Minus => lhs - rhs,
             Op::Mul => lhs * rhs,
             Op::Eq => (lhs == rhs) as i32,
+            Op::Gt => (lhs > rhs) as i32,
         }
     }
 }
@@ -88,9 +90,16 @@ impl FlowInst {
 
 #[derive(Debug, Clone, Copy)]
 struct DataGraphOptimFlags {
-    dead_code_elim: bool,
+    elim_dead_code: bool,
     const_prop: bool,
     tag_eval: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowOptimFlags {
+    elim_dead_code: bool,
+    jump_on_const: bool,
+    data_flags: DataGraphOptimFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +137,21 @@ enum JumpCondition {
     Unconditional,
     Zero,
     NonZero,
+}
+
+impl JumpCondition {
+    fn will_jump(&self, value: i32) -> bool {
+        match self {
+            JumpCondition::Unconditional => true,
+            JumpCondition::Zero if value == 0 => true,
+            JumpCondition::NonZero if value != 0 => true,
+            _ => false,
+        }
+    }
+
+    fn is_conditional(&self) -> bool {
+        matches!(self, JumpCondition::NonZero | JumpCondition::Zero)
+    }
 }
 
 impl From<JumpMode> for JumpCondition {
@@ -419,7 +443,7 @@ impl DataGraph {
     }
 
     fn optimize(&mut self, flags: DataGraphOptimFlags) {
-        if flags.dead_code_elim {
+        if flags.elim_dead_code {
             self.eliminate_dead_code();
         }
 
@@ -449,15 +473,59 @@ impl FlowGraph {
         }
     }
 
-    fn optimize(&mut self, block_optim: DataGraphOptimFlags) {
+    fn jump_on_const(&mut self) {
+        while let Some((node, v)) = self
+            .graph
+            .node_references()
+            .filter_map(|(id, block)| match block {
+                FlowVertex::LinearBlock(block) => Some((id, block)),
+                FlowVertex::Call(_, _) => None,
+            })
+            .filter(|(id, _)| {
+                self.graph
+                    .edges_directed(*id, Direction::Outgoing)
+                    .map(|edge| edge.weight())
+                    .any(JumpCondition::is_conditional)
+            })
+            .find_map(|(id, block)| {
+                block.jump_decided_by.and_then(|jmp| match block.dag[jmp] {
+                    DataVertex::OpResult(LinInst::Const(v)) => Some((id, v)),
+                    _ => None,
+                })
+            })
+        {
+            let outgoings = self
+                .graph
+                .edges_directed(node, Direction::Outgoing)
+                .map(|edge| (edge.id(), *edge.weight()))
+                .collect_vec();
+
+            for (edge, cond) in outgoings {
+                if cond.will_jump(v) {
+                    self.graph[edge] = JumpCondition::Unconditional;
+                } else {
+                    self.graph.remove_edge(edge);
+                }
+            }
+        }
+    }
+
+    fn optimize(&mut self, flow_optim: FlowOptimFlags) {
         for block in self.graph.node_weights_mut() {
             match block {
-                FlowVertex::LinearBlock(graph) => graph.optimize(block_optim),
+                FlowVertex::LinearBlock(graph) => graph.optimize(flow_optim.data_flags),
                 FlowVertex::Call(_, _) => {}
             }
         }
 
-        self.eliminate_dead_code();
+        if flow_optim.elim_dead_code {
+            self.eliminate_dead_code();
+        }
+
+        if flow_optim.jump_on_const {
+            self.jump_on_const();
+            self.eliminate_dead_code();
+        }
     }
 
     // TODO: fill all outputs (is RET operation a early return or something else?)
@@ -678,6 +746,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
                     Some("-") => LinInst(LinInst::BinOp(Op::Minus)),
                     Some("*") => LinInst(LinInst::BinOp(Op::Mul)),
                     Some("==") => LinInst(LinInst::BinOp(Op::Eq)),
+                    Some(">") => LinInst(LinInst::BinOp(Op::Gt)),
                     x => panic!("unknown binary op: {x:?}"),
                 },
                 Some("JMP") => {
@@ -746,6 +815,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     tag_check_eval: bool,
 
+    /// Replace conditional jump on constant with unconditional jump
+    #[arg(short, long, default_value_t = false)]
+    jump_on_const: bool,
+
     #[arg(short = 'O', long, default_value_t = false)]
     optim_full: bool,
 }
@@ -753,26 +826,44 @@ struct Args {
 fn data_flags_from_args(args: &Args) -> DataGraphOptimFlags {
     if args.optim_full {
         DataGraphOptimFlags {
-            dead_code_elim: true,
+            elim_dead_code: true,
             const_prop: true,
             tag_eval: true,
         }
     } else {
         DataGraphOptimFlags {
-            dead_code_elim: args.elim_dead_code,
+            elim_dead_code: args.elim_dead_code,
             const_prop: args.const_prop,
             tag_eval: args.tag_check_eval,
         }
     }
 }
 
+fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
+    let data_flags = data_flags_from_args(args);
+
+    if args.optim_full {
+        FlowOptimFlags {
+            elim_dead_code: true,
+            jump_on_const: true,
+            data_flags,
+        }
+    } else {
+        FlowOptimFlags {
+            elim_dead_code: args.elim_dead_code,
+            jump_on_const: args.jump_on_const,
+            data_flags,
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let data_flags = data_flags_from_args(&args);
+    let flow_flags = flow_flags_from_args(&args);
     let content = read_to_string(File::open(args.source)?)?;
     let code = parse_stack_code(&content);
     let mut output = FlowGraph::analyze_function(code);
-    output.optimize(data_flags);
+    output.optimize(flow_flags);
     let mut buffer = String::new();
     function_graph(&mut buffer, &output).unwrap();
     println!("{buffer}");
