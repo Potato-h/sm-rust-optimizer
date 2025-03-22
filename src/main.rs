@@ -311,6 +311,36 @@ impl DataGraph {
         }
     }
 
+    fn replace_node_for_outgoings(&mut self, node: NodeIndex, new_node: DataVertex) -> NodeIndex {
+        let new_node = self.dag.add_node(new_node);
+
+        let outgoing = self
+            .dag
+            .edges_directed(node, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect_vec();
+
+        for (to, arg_pos) in outgoing {
+            self.dag.add_edge(new_node, to, arg_pos);
+        }
+
+        if let Some((i, _)) = self
+            .outputs
+            .iter()
+            .find_position(|&&out_node| out_node == node)
+        {
+            self.outputs[i] = new_node;
+        }
+
+        if self.jump_decided_by.is_some_and(|jmp| jmp == node) {
+            self.jump_decided_by = Some(new_node);
+        }
+
+        self.dag.remove_node(node);
+
+        new_node
+    }
+
     fn constant_propagation(&mut self) {
         while let Some((node, op)) = self
             .dag
@@ -339,29 +369,7 @@ impl DataGraph {
             };
 
             let value = op.eval(lhs, rhs);
-            let new_node = self
-                .dag
-                .add_node(DataVertex::OpResult(LinInst::Const(value)));
-
-            let outgoing = self
-                .dag
-                .edges_directed(node, Direction::Outgoing)
-                .map(|edge| (edge.target(), *edge.weight()))
-                .collect_vec();
-
-            for (to, arg_pos) in outgoing {
-                self.dag.add_edge(new_node, to, arg_pos);
-            }
-
-            if let Some((i, _)) = self
-                .outputs
-                .iter()
-                .find_position(|&&out_node| out_node == node)
-            {
-                self.outputs[i] = new_node;
-            }
-
-            self.dag.remove_node(node);
+            self.replace_node_for_outgoings(node, DataVertex::OpResult(LinInst::Const(value)));
         }
     }
 
