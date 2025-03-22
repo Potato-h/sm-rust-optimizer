@@ -373,9 +373,35 @@ impl DataGraph {
         }
     }
 
+    fn tag_check_evaluation(&mut self) {
+        while let Some((node, new_value)) = self
+            .dag
+            .edge_references()
+            .filter_map(
+                |edge| match (&self.dag[edge.source()], &self.dag[edge.target()]) {
+                    (
+                        DataVertex::OpResult(LinInst::SExp(have_tag, have_args)),
+                        DataVertex::OpResult(LinInst::Tag(expect_tag, expect_args)),
+                    ) => {
+                        if have_tag == expect_tag && have_args == expect_args {
+                            Some((edge.target(), 1))
+                        } else {
+                            Some((edge.target(), 0))
+                        }
+                    }
+                    _ => None,
+                },
+            )
+            .next()
+        {
+            self.replace_node_for_outgoings(node, DataVertex::OpResult(LinInst::Const(new_value)));
+        }
+    }
+
     fn optimize(&mut self) {
         self.eliminate_dead_code();
         self.constant_propagation();
+        self.tag_check_evaluation();
         self.eliminate_dead_code();
     }
 }
