@@ -34,7 +34,19 @@ impl JumpMode {
 enum Op {
     Plus,
     Minus,
+    Mul,
     Eq,
+}
+
+impl Op {
+    fn eval(&self, lhs: i32, rhs: i32) -> i32 {
+        match self {
+            Op::Plus => lhs + rhs,
+            Op::Minus => lhs - rhs,
+            Op::Mul => lhs * rhs,
+            Op::Eq => (lhs == rhs) as i32,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -300,10 +312,62 @@ impl DataGraph {
     }
 
     fn constant_propagation(&mut self) {
-        todo!()
+        while let Some((node, op)) = self
+            .dag
+            .node_references()
+            .filter_map(|(i, v)| match v {
+                DataVertex::OpResult(LinInst::BinOp(op)) => Some((i, op)),
+                _ => None,
+            })
+            .find(|(i, _)| {
+                self.dag
+                    .neighbors_directed(*i, Direction::Incoming)
+                    .all(|v| matches!(self.dag[v], DataVertex::OpResult(LinInst::Const(_))))
+            })
+        {
+            let Some([lhs, rhs]) = self
+                .dag
+                .edges_directed(node, Direction::Incoming)
+                .sorted_by_key(|edge| edge.weight())
+                .filter_map(|edge| match self.dag[edge.source()] {
+                    DataVertex::OpResult(LinInst::Const(v)) => Some(v),
+                    _ => None,
+                })
+                .collect_array()
+            else {
+                break;
+            };
+
+            let value = op.eval(lhs, rhs);
+            let new_node = self
+                .dag
+                .add_node(DataVertex::OpResult(LinInst::Const(value)));
+
+            let outgoing = self
+                .dag
+                .edges_directed(node, Direction::Outgoing)
+                .map(|edge| (edge.target(), *edge.weight()))
+                .collect_vec();
+
+            for (to, arg_pos) in outgoing {
+                self.dag.add_edge(new_node, to, arg_pos);
+            }
+
+            if let Some((i, _)) = self
+                .outputs
+                .iter()
+                .find_position(|&&out_node| out_node == node)
+            {
+                self.outputs[i] = new_node;
+            }
+
+            self.dag.remove_node(node);
+        }
     }
 
     fn optimize(&mut self) {
+        self.eliminate_dead_code();
+        self.constant_propagation();
         self.eliminate_dead_code();
     }
 }
@@ -547,6 +611,9 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
                     LinInst(LinInst::Const(value))
                 }
                 Some("BINOP") => match tokens.next() {
+                    Some("+") => LinInst(LinInst::BinOp(Op::Plus)),
+                    Some("-") => LinInst(LinInst::BinOp(Op::Minus)),
+                    Some("*") => LinInst(LinInst::BinOp(Op::Mul)),
                     Some("==") => LinInst(LinInst::BinOp(Op::Eq)),
                     x => panic!("unknown binary op: {x:?}"),
                 },
@@ -599,7 +666,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
 
 // TODO: make cli
 fn main() -> Result<(), Box<dyn Error>> {
-    let content = read_to_string(File::open("concat.sm")?)?;
+    let content = read_to_string(File::open("const_prop_example.sm")?)?;
     let code = parse_stack_code(&content);
     let mut output = FlowGraph::analyze_function(code);
     output.optimize();
