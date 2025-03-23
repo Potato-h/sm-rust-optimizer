@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoEdgesDirected, IntoNodeReferences};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
 use petgraph::{algo, prelude::*};
 use Inst::*;
 
@@ -106,6 +106,81 @@ struct FlowOptimFlags {
 enum Inst {
     LinInst(LinInst),
     FlowInst(FlowInst),
+}
+
+impl Inst {
+    fn parse(code: &str) -> Option<Inst> {
+        let mut tokens = code
+            .split(|ch| match ch {
+                ',' | '(' | ')' => true,
+                _ if ch.is_whitespace() => true,
+                _ => false,
+            })
+            .filter(|token| !token.is_empty());
+
+        match tokens.next()? {
+            "BEGIN" => Some(FlowInst(FlowInst::Begin)),
+            "END" => Some(FlowInst(FlowInst::End)),
+            "LD" => {
+                let place = tokens.next()?.to_string();
+                Some(LinInst(LinInst::Load(place)))
+            }
+            "ST" => {
+                let place = tokens.next()?.to_string();
+                Some(LinInst(LinInst::Store(place)))
+            }
+            "DUP" => Some(LinInst(LinInst::Dup)),
+            "DROP" => Some(LinInst(LinInst::Drop)),
+            "LABEL" => {
+                let label = tokens.next()?.to_string();
+                Some(FlowInst(FlowInst::Label(label)))
+            }
+            "CONST" => {
+                let value = tokens.next()?.parse().ok()?;
+                Some(LinInst(LinInst::Const(value)))
+            }
+            "BINOP" => match tokens.next() {
+                Some("+") => Some(LinInst(LinInst::BinOp(Op::Plus))),
+                Some("-") => Some(LinInst(LinInst::BinOp(Op::Minus))),
+                Some("*") => Some(LinInst(LinInst::BinOp(Op::Mul))),
+                Some("==") => Some(LinInst(LinInst::BinOp(Op::Eq))),
+                Some(">") => Some(LinInst(LinInst::BinOp(Op::Gt))),
+                x => panic!("unknown binary op: {x:?}"),
+            },
+            "JMP" => {
+                let label = tokens.next()?.to_string();
+                Some(FlowInst(FlowInst::Jmp(JumpMode::Unconditional, label)))
+            }
+            "CJMP" => {
+                let mode = match tokens.next() {
+                    Some("z") => JumpMode::Zero,
+                    Some("nz") => JumpMode::NonZero,
+                    _ => panic!("unknown jump command"),
+                };
+
+                let label = tokens.next()?.to_string();
+                Some(FlowInst(FlowInst::Jmp(mode, label)))
+            }
+            "ELEM" => Some(LinInst(LinInst::Elem)),
+            "PATT" => {
+                let _ = tokens.next();
+                let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
+                let num = tokens.next()?.parse().ok()?;
+                Some(LinInst(LinInst::Tag(tag.to_string(), num)))
+            }
+            "SEXP" => {
+                let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
+                let num = tokens.next()?.parse().ok()?;
+                Some(LinInst(LinInst::SExp(tag.to_string(), num)))
+            }
+            "CALL" => {
+                let name = tokens.next()?.to_string();
+                let num = tokens.next()?.parse().ok()?;
+                Some(FlowInst(FlowInst::Call(name, num)))
+            }
+            _ => panic!("unknown command"),
+        }
+    }
 }
 
 type ArgStackOffset = usize;
@@ -323,6 +398,12 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
 }
 
 impl DataGraph {
+    fn remove_jump_decision(&mut self) {
+        if let Some(jump) = self.jump_decided_by.take() {
+            self.dag.remove_node(jump);
+        }
+    }
+
     // TODO: is removal of input node breaks relation of block? probably not,
     // because it's only matters for stack values, but we annotate stack depth
     // for each node.
@@ -494,6 +575,11 @@ impl FlowGraph {
                 })
             })
         {
+            match &mut self.graph[node] {
+                FlowVertex::LinearBlock(block) => block.remove_jump_decision(),
+                FlowVertex::Call(_, _) => {}
+            }
+
             let outgoings = self
                 .graph
                 .edges_directed(node, Direction::Outgoing)
@@ -592,6 +678,16 @@ impl FlowGraph {
             input: block_indexes[0],
             outputs: block_indexes.last().into_iter().cloned().collect(),
         }
+    }
+}
+
+struct Unit {
+    functions: BTreeMap<Ident, FlowGraph>,
+}
+
+impl Unit {
+    fn analyze(code: Vec<Inst>) -> Unit {
+        todo!()
     }
 }
 
@@ -711,88 +807,7 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
 
 fn parse_stack_code(code: &str) -> Vec<Inst> {
     code.lines()
-        .map(|line| {
-            let mut tokens = line
-                .split(|ch| match ch {
-                    ',' | '(' | ')' => true,
-                    _ if ch.is_whitespace() => true,
-                    _ => false,
-                })
-                .filter(|token| !token.is_empty());
-
-            match tokens.next() {
-                Some("BEGIN") => FlowInst(FlowInst::Begin),
-                Some("END") => FlowInst(FlowInst::End),
-                Some("LD") => {
-                    let place = tokens.next().unwrap().to_string();
-                    LinInst(LinInst::Load(place))
-                }
-                Some("ST") => {
-                    let place = tokens.next().unwrap().to_string();
-                    LinInst(LinInst::Store(place))
-                }
-                Some("DUP") => LinInst(LinInst::Dup),
-                Some("DROP") => LinInst(LinInst::Drop),
-                Some("LABEL") => {
-                    let label = tokens.next().unwrap().to_string();
-                    FlowInst(FlowInst::Label(label))
-                }
-                Some("CONST") => {
-                    let value = tokens.next().unwrap().parse().unwrap();
-                    LinInst(LinInst::Const(value))
-                }
-                Some("BINOP") => match tokens.next() {
-                    Some("+") => LinInst(LinInst::BinOp(Op::Plus)),
-                    Some("-") => LinInst(LinInst::BinOp(Op::Minus)),
-                    Some("*") => LinInst(LinInst::BinOp(Op::Mul)),
-                    Some("==") => LinInst(LinInst::BinOp(Op::Eq)),
-                    Some(">") => LinInst(LinInst::BinOp(Op::Gt)),
-                    x => panic!("unknown binary op: {x:?}"),
-                },
-                Some("JMP") => {
-                    let label = tokens.next().unwrap().to_string();
-                    FlowInst(FlowInst::Jmp(JumpMode::Unconditional, label))
-                }
-                Some("CJMP") => {
-                    let mode = match tokens.next() {
-                        Some("z") => JumpMode::Zero,
-                        Some("nz") => JumpMode::NonZero,
-                        _ => panic!("unknown jump command"),
-                    };
-
-                    let label = tokens.next().unwrap().to_string();
-                    FlowInst(FlowInst::Jmp(mode, label))
-                }
-                Some("ELEM") => LinInst(LinInst::Elem),
-                Some("PATT") => {
-                    let _ = tokens.next();
-                    let tag = tokens
-                        .next()
-                        .and_then(|s| s.strip_prefix('\"'))
-                        .and_then(|s| s.strip_suffix('\"'))
-                        .unwrap();
-
-                    let num = tokens.next().unwrap().parse().unwrap();
-                    LinInst(LinInst::Tag(tag.to_string(), num))
-                }
-                Some("SEXP") => {
-                    let tag = tokens
-                        .next()
-                        .and_then(|s| s.strip_prefix('\"'))
-                        .and_then(|s| s.strip_suffix('\"'))
-                        .unwrap();
-
-                    let num = tokens.next().unwrap().parse().unwrap();
-                    LinInst(LinInst::SExp(tag.to_string(), num))
-                }
-                Some("CALL") => {
-                    let name = tokens.next().unwrap().to_string();
-                    let num = tokens.next().unwrap().parse().unwrap();
-                    FlowInst(FlowInst::Call(name, num))
-                }
-                _ => panic!("unknown command"),
-            }
-        })
+        .map(|line| Inst::parse(line).expect(&format!("Failed to parse: {line}")))
         .collect()
 }
 
