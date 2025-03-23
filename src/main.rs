@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Write};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::read_to_string;
-use std::mem;
 use std::path::PathBuf;
+use std::{iter, mem};
 
 use clap::Parser;
 use either::Either::{self, Left, Right};
@@ -32,7 +32,7 @@ impl JumpMode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     Plus,
     Minus,
@@ -53,7 +53,7 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LinInst {
     Const(i32),
     Elem,
@@ -66,7 +66,7 @@ enum LinInst {
     Drop,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FlowInst {
     Jmp(JumpMode, Ident),
     Label(Ident),
@@ -75,7 +75,7 @@ enum FlowInst {
     // have control flow instruction which weird to extract from lin block
     Call(Ident, usize),
     Ret,
-    Begin,
+    Begin(Ident),
     End,
 }
 
@@ -102,7 +102,7 @@ struct FlowOptimFlags {
     data_flags: DataGraphOptimFlags,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Inst {
     LinInst(LinInst),
     FlowInst(FlowInst),
@@ -119,7 +119,10 @@ impl Inst {
             .filter(|token| !token.is_empty());
 
         match tokens.next()? {
-            "BEGIN" => Some(FlowInst(FlowInst::Begin)),
+            "BEGIN" => {
+                let name = tokens.next()?;
+                Some(FlowInst(FlowInst::Begin(name.to_string())))
+            }
             "END" => Some(FlowInst(FlowInst::End)),
             "LD" => {
                 let place = tokens.next()?.to_string();
@@ -286,11 +289,13 @@ impl VirtualStack {
     }
 }
 
+#[derive(Debug)]
 enum FlowVertex {
     LinearBlock(DataGraph),
     Call(String, usize),
 }
 
+#[derive(Debug)]
 struct FlowGraph {
     graph: StableGraph<FlowVertex, JumpCondition>,
     input: NodeIndex,
@@ -542,6 +547,7 @@ impl DataGraph {
 
 type Label = String;
 
+// TODO: add optimization that will merge block A and B, with B only have unconditional jump from A
 impl FlowGraph {
     fn eliminate_dead_code(&mut self) {
         while let Some(source) = self
@@ -662,7 +668,7 @@ impl FlowGraph {
                             edge_from_prev = Some((call_node, JumpCondition::Unconditional));
                         }
                         FlowInst::Ret => todo!(),
-                        FlowInst::Begin => continue,
+                        FlowInst::Begin(_) => continue,
                         FlowInst::End => break,
                     }
                 }
@@ -681,13 +687,30 @@ impl FlowGraph {
     }
 }
 
+#[derive(Debug)]
 struct Unit {
     functions: BTreeMap<Ident, FlowGraph>,
 }
 
 impl Unit {
-    fn analyze(code: Vec<Inst>) -> Unit {
-        todo!()
+    fn analyze(mut insts: impl Iterator<Item = Inst>) -> Unit {
+        let mut functions: BTreeMap<Ident, FlowGraph> = BTreeMap::new();
+
+        while let Some(FlowInst(FlowInst::Begin(name))) = insts.next() {
+            let code: Vec<_> = iter::once(FlowInst(FlowInst::Begin(name.clone())))
+                .chain((&mut insts).take_while_inclusive(|inst| inst != &FlowInst(FlowInst::End)))
+                .collect();
+
+            functions.insert(name, FlowGraph::analyze_function(code));
+        }
+
+        Unit { functions }
+    }
+
+    fn optimize(&mut self, flags: FlowOptimFlags) {
+        self.functions
+            .values_mut()
+            .for_each(|flow| flow.optimize(flags));
     }
 }
 
@@ -807,6 +830,7 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
 
 fn parse_stack_code(code: &str) -> Vec<Inst> {
     code.lines()
+        .filter(|line| !line.chars().all(char::is_whitespace))
         .map(|line| Inst::parse(line).expect(&format!("Failed to parse: {line}")))
         .collect()
 }
@@ -817,6 +841,10 @@ struct Args {
     /// Filepath to stack machine code (.sm)
     #[arg(short, long)]
     source: PathBuf,
+
+    /// Path to output dir
+    #[arg(short, long, default_value = None)]
+    graphs_dir: Option<PathBuf>,
 
     /// Eliminate dead code
     #[arg(short, long, default_value_t = false)]
@@ -877,10 +905,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let flow_flags = flow_flags_from_args(&args);
     let content = read_to_string(File::open(args.source)?)?;
     let code = parse_stack_code(&content);
-    let mut output = FlowGraph::analyze_function(code);
-    output.optimize(flow_flags);
-    let mut buffer = String::new();
-    function_graph(&mut buffer, &output).unwrap();
-    println!("{buffer}");
+    let mut unit = Unit::analyze(code.into_iter());
+    unit.optimize(flow_flags);
+
+    if let Some(out_dir) = args.graphs_dir {
+        for (name, flow_graph) in unit.functions.iter() {
+            let mut buffer = String::new();
+            function_graph(&mut buffer, flow_graph)?;
+            fs::write(out_dir.join(name).with_extension("dot"), buffer)?;
+        }
+    }
+
     Ok(())
 }
