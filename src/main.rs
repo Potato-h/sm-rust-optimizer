@@ -100,6 +100,7 @@ struct DataGraphOptimFlags {
 struct FlowOptimFlags {
     elim_dead_code: bool,
     jump_on_const: bool,
+    merge_blocks: bool,
     data_flags: DataGraphOptimFlags,
 }
 
@@ -249,7 +250,7 @@ impl From<JumpMode> for JumpCondition {
 #[derive(Debug, Clone)]
 enum DataVertex {
     Symbolic(Ident),
-    StackVar(usize),
+    StackVar(ArgStackOffset),
     OpResult(LinInst),
 }
 
@@ -297,6 +298,12 @@ impl VirtualStack {
 enum FlowVertex {
     LinearBlock(DataGraph),
     Call(String, usize),
+}
+
+impl FlowVertex {
+    fn is_block(&self) -> bool {
+        matches!(self, Self::LinearBlock(_))
+    }
 }
 
 #[derive(Debug)]
@@ -437,6 +444,75 @@ where
 }
 
 impl DataGraph {
+    fn extend(&mut self, ext: &DataGraph) {
+        let ext_to_source = add_graph(&mut self.dag, &ext.dag);
+
+        let ext_stack_vars_in_source = ext.inputs.iter().filter_map(|&node| match ext.dag[node] {
+            DataVertex::StackVar(offset) => Some((ext_to_source[&node], offset)),
+            _ => None,
+        });
+
+        let mut ext_deleted_inputs = BTreeMap::new();
+
+        for (input, _) in ext_stack_vars_in_source.sorted_by_key(|(_, offset)| *offset) {
+            let output = self.outputs.pop().right_or_else(|var| {
+                let new_stack_arg = self.dag.add_node(var);
+                self.inputs.push(new_stack_arg);
+                new_stack_arg
+            });
+
+            let input_outgoings = self
+                .dag
+                .edges_directed(input, Direction::Outgoing)
+                .map(|edge| (edge.target(), *edge.weight()))
+                .collect_vec();
+
+            for (to, w) in input_outgoings {
+                self.dag.add_edge(output, to, w);
+            }
+
+            ext_deleted_inputs.insert(input, output);
+            self.dag.remove_node(input);
+        }
+
+        // Merge results of 2 stacks. Now self contains actual count of
+        // virtual nodes, but ext contains actual output nodes that will be on stack
+        // after block execution
+        self.outputs.stack = ext
+            .outputs
+            .stack
+            .iter()
+            .map(|node| {
+                *ext_deleted_inputs
+                    .get(&ext_to_source[node])
+                    .unwrap_or(&ext_to_source[node])
+            })
+            .collect_vec();
+
+        let ext_sym_vars_in_source = ext.inputs.iter().filter_map(|&node| match &ext.dag[node] {
+            DataVertex::Symbolic(name) => Some((ext_to_source[&node], name)),
+            _ => None,
+        });
+
+        for (sym, name) in ext_sym_vars_in_source {
+            if let Some(sym_in_source) = self.symbolics.get(name) {
+                // If source block has symbolic value, then just change node
+                // description to store operation from last symbolic value in source
+                self.dag[sym] = DataVertex::OpResult(LinInst::Store(name.clone()));
+                self.dag.add_edge(*sym_in_source, sym, 0);
+            } else {
+                // Otherwise keep symbolic input node
+                self.inputs.push(sym);
+            }
+
+            self.symbolics
+                .insert(name.clone(), ext_to_source[&ext.symbolics[name]]);
+        }
+
+        self.jump_decided_by = ext.jump_decided_by.as_ref().map(|id| ext_to_source[id]);
+        assert!(!algo::is_cyclic_directed(&self.dag));
+    }
+
     fn remove_jump_decision(&mut self) {
         if let Some(jump) = self.jump_decided_by.take() {
             self.dag.remove_node(jump);
@@ -637,6 +713,54 @@ impl FlowGraph {
         }
     }
 
+    fn merge_block_with_unconditional_jump(&mut self) {
+        while let Some((from, to)) = self
+            .graph
+            .node_references()
+            .filter(|(id, vertex)| *id != self.input && vertex.is_block())
+            .find_map(|(to, _)| {
+                self.graph
+                    .edges_directed(to, Direction::Incoming)
+                    .map(|edge| (edge.source(), *edge.weight()))
+                    .collect_array()
+                    .and_then(|x| match x {
+                        [(from, JumpCondition::Unconditional)] if self.graph[from].is_block() => {
+                            Some((from, to))
+                        }
+                        _ => None,
+                    })
+            })
+        {
+            let ext = match &self.graph[to] {
+                FlowVertex::LinearBlock(block) => block.clone(),
+                FlowVertex::Call(_, _) => unreachable!("by filter"),
+            };
+
+            match &mut self.graph[from] {
+                FlowVertex::LinearBlock(block) => block.extend(&ext),
+                FlowVertex::Call(_, _) => unreachable!("by filter"),
+            }
+
+            let outgoings = self
+                .graph
+                .edges_directed(to, Direction::Outgoing)
+                .map(|edge| (edge.target(), *edge.weight()))
+                .collect_vec();
+
+            for (to, w) in outgoings {
+                self.graph.add_edge(from, to, w);
+            }
+
+            // Since `from` and `to` is one block, we should preserve output status in merged block
+            if self.outputs.contains(&to) {
+                self.outputs.retain(|&out| out != from && out != to);
+                self.outputs.push(from);
+            }
+
+            self.graph.remove_node(to);
+        }
+    }
+
     fn optimize(&mut self, flow_optim: FlowOptimFlags) {
         for block in self.graph.node_weights_mut() {
             match block {
@@ -652,6 +776,10 @@ impl FlowGraph {
         if flow_optim.jump_on_const {
             self.jump_on_const();
             self.eliminate_dead_code();
+        }
+
+        if flow_optim.merge_blocks {
+            self.merge_block_with_unconditional_jump();
         }
     }
 
@@ -947,6 +1075,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     jump_on_const: bool,
 
+    /// Merge blocks with unconditional jump between them
+    #[arg(short, long, default_value_t = false)]
+    merge_blocks: bool,
+
     #[arg(short = 'O', long, default_value_t = false)]
     optim_full: bool,
 }
@@ -975,12 +1107,14 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             elim_dead_code: true,
             jump_on_const: true,
             data_flags,
+            merge_blocks: true,
         }
     } else {
         FlowOptimFlags {
             elim_dead_code: args.elim_dead_code,
             jump_on_const: args.jump_on_const,
             data_flags,
+            merge_blocks: args.merge_blocks,
         }
     }
 }
