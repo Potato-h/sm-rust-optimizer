@@ -189,24 +189,27 @@ impl Inst {
 
 type ArgStackOffset = usize;
 
-// TODO: aside from outputs on stack, should store symbolics
 #[derive(Debug, Clone)]
 struct DataGraph {
     start_label: String,
     dag: StableGraph<DataVertex, ArgStackOffset>,
     inputs: Vec<NodeIndex>,
-    outputs: Vec<NodeIndex>,
+    outputs: VirtualStack,
     symbolics: BTreeMap<Ident, NodeIndex>,
     jump_decided_by: Option<NodeIndex>,
 }
 
 impl DataGraph {
+    fn outputs_nodes(&self) -> &[NodeIndex] {
+        &self.outputs.stack
+    }
+
     fn info_label(&self) -> String {
         format!(
             "{}\\linputs: {}\\loutputs: {}",
             self.start_label,
             self.inputs.len(),
-            self.outputs.len()
+            self.outputs_nodes().len()
         )
     }
 }
@@ -250,7 +253,7 @@ enum DataVertex {
     OpResult(LinInst),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VirtualStack {
     tail_from: usize,
     stack: Vec<NodeIndex>,
@@ -397,7 +400,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         start_label,
         dag,
         inputs,
-        outputs: stack.stack,
+        outputs: stack,
         symbolics,
         jump_decided_by,
     }
@@ -449,7 +452,7 @@ impl DataGraph {
         let outputs: BTreeSet<_> = self
             .jump_decided_by
             .iter()
-            .chain(self.outputs.iter())
+            .chain(self.outputs_nodes().iter())
             .cloned()
             .collect();
 
@@ -482,10 +485,11 @@ impl DataGraph {
 
         if let Some((i, _)) = self
             .outputs
+            .stack
             .iter()
             .find_position(|&&out_node| out_node == node)
         {
-            self.outputs[i] = new_node;
+            self.outputs.stack[i] = new_node;
         }
 
         if self.jump_decided_by.is_some_and(|jmp| jmp == node) {
@@ -835,7 +839,7 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
         writeln!(w, "sub{label}_input -> sub{label}{};", node.index())?;
     }
 
-    for node in graph.outputs.iter() {
+    for node in graph.outputs_nodes().iter() {
         writeln!(w, "sub{label}{} -> sub{label}_output;", node.index())?;
     }
 
@@ -846,10 +850,10 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
             w,
             "\" {}];",
             match () {
-                _ if graph.inputs.contains(&node) && graph.outputs.contains(&node) =>
+                _ if graph.inputs.contains(&node) && graph.outputs_nodes().contains(&node) =>
                     "color = yellow",
                 _ if graph.inputs.contains(&node) => "color = green",
-                _ if graph.outputs.contains(&node) => "color = red",
+                _ if graph.outputs_nodes().contains(&node) => "color = red",
                 _ if graph.jump_decided_by.iter().contains(&node) => "color = purple",
                 _ => "",
             }
