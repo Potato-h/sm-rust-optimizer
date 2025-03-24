@@ -9,8 +9,9 @@ use std::{iter, mem};
 use clap::Parser;
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
-use petgraph::{algo, prelude::*};
+use petgraph::csr::IndexType;
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoEdgesDirected, IntoNodeReferences};
+use petgraph::{algo, prelude::*, EdgeType};
 use Inst::*;
 
 type Ident = String;
@@ -210,7 +211,7 @@ impl DataGraph {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JumpCondition {
     Unconditional,
     Zero,
@@ -289,7 +290,7 @@ impl VirtualStack {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum FlowVertex {
     LinearBlock(DataGraph),
     Call(String, usize),
@@ -400,6 +401,36 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         symbolics,
         jump_decided_by,
     }
+}
+
+/// Insert graph `extend` into graph `source` and return mapping of old `extend` indexes
+/// into indexes into updated `source`.
+fn add_graph<N, E, Ty, Ix>(
+    source: &mut StableGraph<N, E, Ty, Ix>,
+    extend: &StableGraph<N, E, Ty, Ix>,
+) -> BTreeMap<NodeIndex<Ix>, NodeIndex<Ix>>
+where
+    Ix: IndexType,
+    Ty: EdgeType,
+    N: Clone,
+    E: Clone,
+{
+    let mut extend_to_source = BTreeMap::new();
+
+    for (id, w) in extend.node_references() {
+        let new_id = source.add_node(w.clone());
+        extend_to_source.insert(id, new_id);
+    }
+
+    for edge in extend.edge_references() {
+        source.add_edge(
+            extend_to_source[&edge.source()],
+            extend_to_source[&edge.target()],
+            edge.weight().clone(),
+        );
+    }
+
+    extend_to_source
 }
 
 impl DataGraph {
@@ -684,6 +715,56 @@ impl FlowGraph {
             input: block_indexes[0],
             outputs: block_indexes.last().into_iter().cloned().collect(),
         }
+    }
+
+    fn replace_node_with_graph(&mut self, node: NodeIndex, replacement: &FlowGraph) {
+        assert_ne!(self.input, node, "Can't replace input node with graph");
+
+        for &out in self.outputs.iter() {
+            assert_ne!(out, node, "Can't replace output node with graph");
+        }
+
+        for edge in self.graph.edges_directed(node, Direction::Outgoing) {
+            assert_eq!(
+                *edge.weight(),
+                JumpCondition::Unconditional,
+                "All jumps from replaced node should be unconditional"
+            );
+        }
+
+        let incomings = self
+            .graph
+            .edges_directed(node, Direction::Incoming)
+            .map(|edge| (edge.source(), *edge.weight()))
+            .collect_vec();
+
+        let outgoings = self
+            .graph
+            .edges_directed(node, Direction::Outgoing)
+            .map(|edge| edge.target())
+            .collect_vec();
+
+        let replacement_remapping = add_graph(&mut self.graph, &replacement.graph);
+
+        for (from, cond) in incomings {
+            self.graph
+                .add_edge(from, replacement_remapping[&replacement.input], cond);
+        }
+
+        for out in replacement.outputs.iter() {
+            let out = replacement_remapping[out];
+
+            for to in outgoings.iter() {
+                self.graph.add_edge(out, *to, JumpCondition::Unconditional);
+            }
+        }
+    }
+
+    // TODO: how to actually deal with symbolics after inlining?
+    // TODO: need to insert additional linear block that will deal
+    //  with passing function arguments from stack
+    fn replace_call_with_graph(&mut self, call: Ident, replacement: &FlowGraph) {
+        todo!()
     }
 }
 
