@@ -75,7 +75,6 @@ enum FlowInst {
     // arbitrary change of global variables. And after unfolding it can
     // have control flow instruction which weird to extract from lin block
     Call(Ident, usize),
-    Ret,
     Begin(Ident),
     End,
 }
@@ -830,7 +829,6 @@ impl FlowGraph {
                             graph.add_edge(node, call_node, JumpCondition::Unconditional);
                             edge_from_prev = Some((call_node, JumpCondition::Unconditional));
                         }
-                        FlowInst::Ret => todo!(),
                         FlowInst::Begin(_) => continue,
                         FlowInst::End => break,
                     }
