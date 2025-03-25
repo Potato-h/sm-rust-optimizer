@@ -101,6 +101,7 @@ struct FlowOptimFlags {
     jump_on_const: bool,
     merge_blocks: bool,
     data_flags: DataGraphOptimFlags,
+    passes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -775,24 +776,26 @@ impl FlowGraph {
     }
 
     fn optimize(&mut self, flow_optim: FlowOptimFlags) {
-        for block in self.graph.node_weights_mut() {
-            match block {
-                FlowVertex::LinearBlock(graph) => graph.optimize(flow_optim.data_flags),
-                FlowVertex::Call(_, _) => {}
+        for _ in 0..flow_optim.passes {
+            for block in self.graph.node_weights_mut() {
+                match block {
+                    FlowVertex::LinearBlock(graph) => graph.optimize(flow_optim.data_flags),
+                    FlowVertex::Call(_, _) => {}
+                }
             }
-        }
 
-        if flow_optim.elim_dead_code {
-            self.eliminate_dead_code();
-        }
+            if flow_optim.elim_dead_code {
+                self.eliminate_dead_code();
+            }
 
-        if flow_optim.jump_on_const {
-            self.jump_on_const();
-            self.eliminate_dead_code();
-        }
+            if flow_optim.jump_on_const {
+                self.jump_on_const();
+                self.eliminate_dead_code();
+            }
 
-        if flow_optim.merge_blocks {
-            self.merge_block_with_unconditional_jump();
+            if flow_optim.merge_blocks {
+                self.merge_block_with_unconditional_jump();
+            }
         }
     }
 
@@ -1091,6 +1094,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     merge_blocks: bool,
 
+    /// Try optimize flow with `passes` iterations
+    #[arg(short, long, default_value_t = 1)]
+    passes: u32,
+
     #[arg(short = 'O', long, default_value_t = false)]
     optim_full: bool,
 }
@@ -1120,6 +1127,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             jump_on_const: true,
             data_flags,
             merge_blocks: true,
+            passes: args.passes,
         }
     } else {
         FlowOptimFlags {
@@ -1127,6 +1135,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             jump_on_const: args.jump_on_const,
             data_flags,
             merge_blocks: args.merge_blocks,
+            passes: args.passes,
         }
     }
 }

@@ -1,0 +1,115 @@
+BEGIN LSexp_patt_example, 3, 8, 0
+LD arg[0]
+LD arg[1]
+LD arg[0]
+LD arg[2]
+BINOP +
+SEXP "Foo", 3
+ST loc[0]
+DROP
+LD loc[0]
+LABEL L61, 0
+DUP
+PATT Tag ("Foo", 2)
+CJMP z, L43
+DUP
+CONST 0
+ELEM
+DROP
+DUP
+CONST 1
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 1
+ELEM
+ST loc[6]
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[7]
+DROP
+LD loc[7]
+LD loc[6]
+BINOP +
+JMP L13
+LABEL L43_drop_1, 0
+DROP
+LABEL L43, 0
+DUP
+PATT Tag ("Bar", 3)
+CJMP z, L15
+DUP
+CONST 0
+ELEM
+DROP
+DUP
+CONST 1
+ELEM
+DROP
+DUP
+CONST 2
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 2
+ELEM
+ST loc[4]
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[5]
+DROP
+LD loc[5]
+LD loc[4]
+BINOP +
+JMP L13
+LABEL L15_drop_1, 0
+DROP
+LABEL L15, 0
+DUP
+PATT Tag ("Foo", 3)
+CJMP z, L14
+DUP
+CONST 0
+ELEM
+DROP
+DUP
+CONST 1
+ELEM
+DROP
+DUP
+CONST 2
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 2
+ELEM
+ST loc[1]
+DROP
+LD loc[0]
+CONST 1
+ELEM
+ST loc[2]
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[3]
+DROP
+LD loc[3]
+LD loc[2]
+BINOP +
+LD loc[1]
+BINOP +
+JMP L13
+LABEL L14_drop_1, 0
+DROP
+LABEL L14, 0
+LABEL L13, 0
+END
