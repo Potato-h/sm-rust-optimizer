@@ -377,7 +377,9 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
                 }
             }
             LinInst::Drop => {
-                stack.pop();
+                // TODO: actually, is this right? we can do drop at the start of linear block,
+                // but silent `pop` will just ignore dependency from blocks into that block
+                stack.pop().right_or_else(|var| dag.add_node(var));
             }
         }
     }
@@ -477,16 +479,13 @@ impl DataGraph {
         // Merge results of 2 stacks. Now self contains actual count of
         // virtual nodes, but ext contains actual output nodes that will be on stack
         // after block execution
-        self.outputs.stack = ext
-            .outputs
+        self.outputs
             .stack
-            .iter()
-            .map(|node| {
+            .extend(ext.outputs.stack.iter().map(|node| {
                 *ext_deleted_inputs
                     .get(&ext_to_source[node])
                     .unwrap_or(&ext_to_source[node])
-            })
-            .collect_vec();
+            }));
 
         let ext_sym_vars_in_source = ext.inputs.iter().filter_map(|&node| match &ext.dag[node] {
             DataVertex::Symbolic(name) => Some((ext_to_source[&node], name)),
@@ -518,22 +517,38 @@ impl DataGraph {
         }
     }
 
-    // TODO: is removal of input node breaks relation of block? probably not,
+    // NOTE: is removal of input node breaks relation of block? probably not,
     // because it's only matters for stack values, but we annotate stack depth
     // for each node.
+    // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    // this is actually false. for example we can have following structure
+    //
+    // A {0, 1} -> B {1} -> C {0}. if B contains dead code dependent on stack variables, then
+    // stack variable by itself preserve stack levels used in C. If we remove all information
+    // about using {1} in B, then after block merge, C will use {1} not desired {0}.
+    //
     // TODO: is some cases symbolic variable may be useless for specific block,
     // but actually bypassed for next blocks
     fn eliminate_dead_code(&mut self) {
+        let stack_inputs: BTreeSet<_> = self
+            .inputs
+            .iter()
+            .cloned()
+            .filter(|&input| matches!(self.dag[input], DataVertex::StackVar(_)))
+            .collect();
+
         let outputs: BTreeSet<_> = self
             .jump_decided_by
             .iter()
             .chain(self.outputs_nodes().iter())
+            .chain(self.symbolics.values())
             .cloned()
             .collect();
 
         while let Some(sink) = self
             .dag
             .node_indices()
+            .filter(|id| !stack_inputs.contains(id))
             .filter(|id| !outputs.contains(id))
             .find(|id| self.dag.edges_directed(*id, Direction::Outgoing).count() == 0)
         {
