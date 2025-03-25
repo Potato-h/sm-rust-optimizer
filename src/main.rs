@@ -657,7 +657,6 @@ impl DataGraph {
 
 type Label = String;
 
-// TODO: add optimization that will merge block A and B, with B only have unconditional jump from A
 impl FlowGraph {
     fn eliminate_dead_code(&mut self) {
         while let Some(source) = self
@@ -782,7 +781,6 @@ impl FlowGraph {
         }
     }
 
-    // TODO: fill all outputs (is RET operation a early return or something else?)
     fn analyze_function(code: Vec<Inst>) -> Self {
         let mut edges: Vec<(NodeIndex, Label, JumpCondition)> = Vec::new();
         let mut edge_from_prev: Option<(NodeIndex, JumpCondition)> = None;
