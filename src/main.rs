@@ -91,6 +91,7 @@ impl FlowInst {
 #[derive(Debug, Clone, Copy)]
 struct DataGraphOptimFlags {
     elim_dead_code: bool,
+    elim_stores: bool,
     const_prop: bool,
     tag_eval: bool,
 }
@@ -348,10 +349,10 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
             LinInst::Const(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::Elem => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Store(ref name) => {
-                // let node = dag.add_node(inst_vertex(&inst));
+                let node = dag.add_node(inst_vertex(&inst));
                 let from = stack.peek().right_or_else(|var| dag.add_node(var));
-                // dag.add_edge(from, node, 0);
-                symbolics.insert(name.clone(), from);
+                dag.add_edge(from, node, 0);
+                symbolics.insert(name.clone(), node);
             }
             LinInst::Load(ref name) => {
                 if !symbolics.contains_key(name) {
@@ -518,6 +519,39 @@ impl DataGraph {
         }
     }
 
+    fn remove_stores(&mut self) {
+        while let Some(store) = self
+            .dag
+            .node_indices()
+            .find(|&id| matches!(&self.dag[id], DataVertex::OpResult(LinInst::Store(_))))
+        {
+            eprintln!("Found store: {store:?}");
+
+            let store_source = self
+                .dag
+                .edges_directed(store, Direction::Incoming)
+                .map(|edge| edge.source())
+                .collect_vec();
+
+            let store_usages = self
+                .dag
+                .edges_directed(store, Direction::Outgoing)
+                .map(|edge| (edge.target(), *edge.weight()))
+                .collect_vec();
+
+            // this loop must have exactly one iteration
+            for from in store_source {
+                for (to, w) in store_usages.iter().cloned() {
+                    self.dag.add_edge(from, to, w);
+                }
+
+                self.change_output_state(store, from);
+            }
+
+            self.dag.remove_node(store);
+        }
+    }
+
     // NOTE: is removal of input node breaks relation of block? probably not,
     // because it's only matters for stack values, but we annotate stack depth
     // for each node.
@@ -558,22 +592,7 @@ impl DataGraph {
         }
     }
 
-    /// Replace node with new value and saves *only* outgoing edges from this node.
-    /// All incoming edges deleted. Replaces all entries of this node in special nodes (stack outputs,
-    /// symbolics, jump decision variable) with new node.
-    fn replace_node_for_outgoings(&mut self, node: NodeIndex, new_node: DataVertex) -> NodeIndex {
-        let new_node = self.dag.add_node(new_node);
-
-        let outgoing = self
-            .dag
-            .edges_directed(node, Direction::Outgoing)
-            .map(|edge| (edge.target(), *edge.weight()))
-            .collect_vec();
-
-        for (to, arg_pos) in outgoing {
-            self.dag.add_edge(new_node, to, arg_pos);
-        }
-
+    fn change_output_state(&mut self, node: NodeIndex, new_node: NodeIndex) {
         if let Some((i, _)) = self
             .outputs
             .stack
@@ -591,9 +610,26 @@ impl DataGraph {
             .values_mut()
             .filter(|s| **s == node)
             .for_each(|s| *s = new_node);
+    }
 
+    /// Replace node with new value and saves *only* outgoing edges from this node.
+    /// All incoming edges deleted. Replaces all entries of this node in special nodes (stack outputs,
+    /// symbolics, jump decision variable) with new node.
+    fn replace_node_for_outgoings(&mut self, node: NodeIndex, new_node: DataVertex) -> NodeIndex {
+        let new_node = self.dag.add_node(new_node);
+
+        let outgoing = self
+            .dag
+            .edges_directed(node, Direction::Outgoing)
+            .map(|edge| (edge.target(), *edge.weight()))
+            .collect_vec();
+
+        for (to, arg_pos) in outgoing {
+            self.dag.add_edge(new_node, to, arg_pos);
+        }
+
+        self.change_output_state(node, new_node);
         self.dag.remove_node(node);
-
         new_node
     }
 
@@ -655,6 +691,10 @@ impl DataGraph {
     }
 
     fn optimize(&mut self, flags: DataGraphOptimFlags) {
+        if flags.elim_stores {
+            self.remove_stores();
+        }
+
         if flags.elim_dead_code {
             self.eliminate_dead_code();
         }
@@ -1078,6 +1118,9 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     elim_dead_code: bool,
 
+    #[arg(long, default_value_t = false)]
+    elim_stores: bool,
+
     /// Propagate constant
     #[arg(short, long, default_value_t = false)]
     const_prop: bool,
@@ -1108,12 +1151,14 @@ fn data_flags_from_args(args: &Args) -> DataGraphOptimFlags {
             elim_dead_code: true,
             const_prop: true,
             tag_eval: true,
+            elim_stores: true,
         }
     } else {
         DataGraphOptimFlags {
             elim_dead_code: args.elim_dead_code,
             const_prop: args.const_prop,
             tag_eval: args.tag_check_eval,
+            elim_stores: args.elim_stores,
         }
     }
 }
