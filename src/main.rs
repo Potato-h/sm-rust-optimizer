@@ -347,10 +347,10 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
             LinInst::Const(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::Elem => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Store(ref name) => {
-                let node = dag.add_node(inst_vertex(&inst));
+                // let node = dag.add_node(inst_vertex(&inst));
                 let from = stack.peek().right_or_else(|var| dag.add_node(var));
-                dag.add_edge(from, node, 0);
-                symbolics.insert(name.clone(), node);
+                // dag.add_edge(from, node, 0);
+                symbolics.insert(name.clone(), from);
             }
             LinInst::Load(ref name) => {
                 if !symbolics.contains_key(name) {
