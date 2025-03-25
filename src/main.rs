@@ -206,7 +206,7 @@ impl DataGraph {
 
     fn info_label(&self) -> String {
         format!(
-            "{}\\linputs: {}\\loutputs: {}",
+            "{}\ninputs: {}\noutputs: {}",
             self.start_label,
             self.inputs.len(),
             self.outputs_nodes().len()
@@ -956,8 +956,8 @@ where
 fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result {
     writeln!(w, "subgraph cluster_{label} {{")?;
     writeln!(w, "label = \"{}\";", graph.info_label())?;
-    writeln!(w, "style = filled;")?;
-    writeln!(w, "color = lightgrey;")?;
+    writeln!(w, "style = rounded;")?;
+    writeln!(w, "color = black;")?;
     writeln!(w, "sub{label}_input [shape = point style = invis];")?;
     writeln!(w, "sub{label}_output [shape = point style = invis];")?;
 
@@ -1014,6 +1014,7 @@ fn call_subgraph<W: Write>(w: &mut W, label: &str, name: &str, args: usize) -> f
 fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
     writeln!(w, "digraph G {{")?;
     writeln!(w, "compound = true;")?;
+    writeln!(w, "node [shape=box]")?;
 
     for block in flow.graph.node_indices() {
         let label = block.index().to_string();
