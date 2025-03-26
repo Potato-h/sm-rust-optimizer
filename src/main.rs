@@ -10,7 +10,7 @@ use clap::Parser;
 use either::Either::{self, Left, Right};
 use itertools::Itertools;
 use petgraph::csr::IndexType;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoEdgesDirected, IntoNodeReferences};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
 use petgraph::{algo, prelude::*, EdgeType};
 use Inst::*;
 
@@ -54,12 +54,18 @@ impl Op {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Sym {
+    Arg(u16),
+    Loc(u16),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LinInst {
     Const(i32),
     Elem,
-    Store(Ident),
-    Load(Ident),
+    Store(Sym),
+    Load(Sym),
     BinOp(Op),
     Tag(Ident, usize),
     SExp(Ident, usize),
@@ -115,7 +121,7 @@ impl Inst {
     fn parse(code: &str) -> Option<Inst> {
         let mut tokens = code
             .split(|ch| match ch {
-                ',' | '(' | ')' => true,
+                ',' | '(' | ')' | '[' | ']' => true,
                 _ if ch.is_whitespace() => true,
                 _ => false,
             })
@@ -128,12 +134,26 @@ impl Inst {
             }
             "END" => Some(FlowInst(FlowInst::End)),
             "LD" => {
-                let place = tokens.next()?.to_string();
-                Some(LinInst(LinInst::Load(place)))
+                let typ = tokens.next()?;
+                let id = tokens.next()?.parse().ok()?;
+                let sym = match typ {
+                    "arg" => Some(Sym::Arg(id)),
+                    "loc" => Some(Sym::Loc(id)),
+                    _ => None,
+                }?;
+
+                Some(LinInst(LinInst::Load(sym)))
             }
             "ST" => {
-                let place = tokens.next()?.to_string();
-                Some(LinInst(LinInst::Store(place)))
+                let typ = tokens.next()?;
+                let id = tokens.next()?.parse().ok()?;
+                let sym = match typ {
+                    "arg" => Some(Sym::Arg(id)),
+                    "loc" => Some(Sym::Loc(id)),
+                    _ => None,
+                }?;
+
+                Some(LinInst(LinInst::Store(sym)))
             }
             "DUP" => Some(LinInst(LinInst::Dup)),
             "DROP" => Some(LinInst(LinInst::Drop)),
@@ -197,7 +217,7 @@ struct DataGraph {
     dag: StableGraph<DataVertex, ArgStackOffset>,
     inputs: Vec<NodeIndex>,
     outputs: VirtualStack,
-    symbolics: BTreeMap<Ident, NodeIndex>,
+    symbolics: BTreeMap<Sym, NodeIndex>,
     jump_decided_by: Option<NodeIndex>,
 }
 
@@ -213,6 +233,28 @@ impl DataGraph {
             self.inputs.len(),
             self.outputs_nodes().len()
         )
+    }
+
+    fn args_count(&self) -> u16 {
+        self.symbolics
+            .keys()
+            .filter_map(|&x| match x {
+                Sym::Arg(x) => Some(x + 1),
+                Sym::Loc(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn locs_count(&self) -> u16 {
+        self.symbolics
+            .keys()
+            .filter_map(|&x| match x {
+                Sym::Arg(_) => None,
+                Sym::Loc(x) => Some(x + 1),
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -250,7 +292,7 @@ impl From<JumpMode> for JumpCondition {
 
 #[derive(Debug, Clone)]
 enum DataVertex {
-    Symbolic(Ident),
+    Symbolic(Sym),
     StackVar(ArgStackOffset),
     OpResult(LinInst),
 }
@@ -307,7 +349,7 @@ impl FlowVertex {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FlowGraph {
     graph: StableGraph<FlowVertex, JumpCondition>,
     input: NodeIndex,
@@ -321,7 +363,7 @@ fn inst_vertex(inst: &LinInst) -> DataVertex {
 fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) -> DataGraph {
     let mut dag = StableGraph::new();
     let mut stack = VirtualStack::new();
-    let mut symbolics: BTreeMap<Ident, NodeIndex> = BTreeMap::new();
+    let mut symbolics: BTreeMap<Sym, NodeIndex> = BTreeMap::new();
 
     fn n_arity_inst(
         dag: &mut StableGraph<DataVertex, usize>,
@@ -348,19 +390,27 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         match inst {
             LinInst::Const(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::Elem => n_arity_inst(&mut dag, &mut stack, 2, inst),
-            LinInst::Store(ref name) => {
+            LinInst::Store(sym) => {
                 let node = dag.add_node(inst_vertex(&inst));
-                let from = stack.peek().right_or_else(|var| dag.add_node(var));
+                let from = match stack.peek() {
+                    Left(v) => {
+                        let node = dag.add_node(v);
+                        stack.pop(); // move lazy input stack variable
+                        stack.push(node); // reify lazy input stack variable
+                        node
+                    }
+                    Right(node) => node,
+                };
                 dag.add_edge(from, node, 0);
-                symbolics.insert(name.clone(), node);
+                symbolics.insert(sym, node);
             }
-            LinInst::Load(ref name) => {
-                if !symbolics.contains_key(name) {
-                    let node = dag.add_node(DataVertex::Symbolic(name.clone()));
-                    symbolics.insert(name.clone(), node);
+            LinInst::Load(sym) => {
+                if !symbolics.contains_key(&sym) {
+                    let node = dag.add_node(DataVertex::Symbolic(sym));
+                    symbolics.insert(sym, node);
                 }
 
-                stack.push(symbolics[name]);
+                stack.push(symbolics[&sym]);
             }
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
@@ -498,7 +548,7 @@ impl DataGraph {
             if let Some(sym_in_source) = self.symbolics.get(name) {
                 // If source block has symbolic value, then just change node
                 // description to store operation from last symbolic value in source
-                self.dag[sym] = DataVertex::OpResult(LinInst::Store(name.clone()));
+                self.dag[sym] = DataVertex::OpResult(LinInst::Store(*name));
                 self.dag.add_edge(*sym_in_source, sym, 0);
             } else {
                 // Otherwise keep symbolic input node
@@ -506,7 +556,7 @@ impl DataGraph {
             }
 
             self.symbolics
-                .insert(name.clone(), ext_to_source[&ext.symbolics[name]]);
+                .insert(*name, ext_to_source[&ext.symbolics[name]]);
         }
 
         self.jump_decided_by = ext.jump_decided_by.as_ref().map(|id| ext_to_source[id]);
@@ -709,11 +759,54 @@ impl DataGraph {
             self.eliminate_dead_code();
         }
     }
+
+    fn shift_symbolics_for_inline(&mut self, first_free_loc: u16, args_count: u16) {
+        for node in self.dag.node_weights_mut() {
+            match node {
+                DataVertex::Symbolic(sym) => *sym = sym_shift(*sym, first_free_loc, args_count),
+                _ => {}
+            }
+        }
+
+        self.symbolics = mem::take(&mut self.symbolics)
+            .into_iter()
+            .map(|(k, v)| (sym_shift(k, first_free_loc, args_count), v))
+            .collect();
+    }
+}
+
+fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
+    match sym {
+        Sym::Arg(i) => Sym::Loc(first_free_loc + i),
+        Sym::Loc(i) => Sym::Loc(first_free_loc + args_count + i),
+    }
 }
 
 type Label = String;
 
 impl FlowGraph {
+    fn args_count(&self) -> u16 {
+        self.graph
+            .node_weights()
+            .filter_map(|v| match v {
+                FlowVertex::LinearBlock(block) => Some(block.args_count()),
+                FlowVertex::Call(_, _) => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn loc_count(&self) -> u16 {
+        self.graph
+            .node_weights()
+            .filter_map(|v| match v {
+                FlowVertex::LinearBlock(block) => Some(block.locs_count()),
+                FlowVertex::Call(_, _) => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     fn eliminate_dead_code(&mut self) {
         while let Some(source) = self
             .graph
@@ -944,14 +1037,77 @@ impl FlowGraph {
                 self.graph.add_edge(out, *to, JumpCondition::Unconditional);
             }
         }
+
+        self.graph.remove_node(node);
     }
 
     // TODO: how to actually deal with symbolics after inlining?
     // TODO: need to insert additional linear block that will deal
     //  with passing function arguments from stack
-    fn replace_call_with_graph(&mut self, call: Ident, replacement: &FlowGraph) {
-        todo!()
+    fn replace_call_with_graph(&mut self, call: NodeIndex, mut replacement: FlowGraph) {
+        let first_free_loc = self.loc_count();
+        let call_args = replacement.args_count();
+        replacement.shift_symbolics_for_inline(first_free_loc);
+
+        let prev_input = replacement.input;
+        let prologue = gen_inline_call_prologue("prologue".to_string(), call_args, first_free_loc);
+        let input = replacement
+            .graph
+            .add_node(FlowVertex::LinearBlock(prologue));
+
+        replacement.input = input;
+        replacement
+            .graph
+            .add_edge(input, prev_input, JumpCondition::Unconditional);
+
+        self.replace_node_with_graph(call, &replacement);
     }
+
+    fn replace_all_calls(&mut self, call: &str, replacement: &FlowGraph, mut unfold_limit: u32) {
+        let expect_args = replacement.args_count();
+
+        while let Some(node) = self.graph.node_references().find_map(|(id, v)| match v {
+            FlowVertex::Call(name, cnt) if name == call => {
+                assert_eq!(*cnt as u16, expect_args);
+                Some(id)
+            }
+            _ => None,
+        }) {
+            if unfold_limit == 0 {
+                break;
+            }
+
+            self.replace_call_with_graph(node, replacement.clone());
+            unfold_limit -= 1;
+        }
+    }
+
+    fn shift_symbolics_for_inline(&mut self, first_free_loc: u16) {
+        let args = self.args_count();
+
+        for node in self.graph.node_weights_mut() {
+            match node {
+                FlowVertex::LinearBlock(block) => {
+                    block.shift_symbolics_for_inline(first_free_loc, args)
+                }
+                FlowVertex::Call(_, _) => {}
+            }
+        }
+    }
+}
+
+fn gen_inline_call_prologue(label: String, args: u16, first_free_loc: u16) -> DataGraph {
+    let inst = (0..args)
+        .rev()
+        .flat_map(|i| [LinInst::Store(Sym::Loc(first_free_loc + i)), LinInst::Drop])
+        .collect_vec();
+
+    analyze_lin_block(label, inst, false)
+}
+
+struct UnitOptimFlags {
+    flow_optim: FlowOptimFlags,
+    force_inline: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -974,10 +1130,19 @@ impl Unit {
         Unit { functions }
     }
 
-    fn optimize(&mut self, flags: FlowOptimFlags) {
+    fn optimize(&mut self, flags: UnitOptimFlags) {
         self.functions
             .values_mut()
-            .for_each(|flow| flow.optimize(flags));
+            .for_each(|flow| flow.optimize(flags.flow_optim));
+
+        for call in flags.force_inline.iter() {
+            let call_graph = self.functions[call].clone();
+
+            self.functions.values_mut().for_each(|flow| {
+                flow.replace_all_calls(&call, &call_graph, 1);
+                flow.optimize(flags.flow_optim);
+            });
+        }
     }
 }
 
@@ -1141,6 +1306,9 @@ struct Args {
     #[arg(short, long, default_value_t = 1)]
     passes: u32,
 
+    #[arg(long, value_delimiter = ' ', num_args = 1.., default_value = None)]
+    force_inline: Option<Vec<String>>,
+
     #[arg(short = 'O', long, default_value_t = false)]
     optim_full: bool,
 }
@@ -1185,13 +1353,24 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
     }
 }
 
+fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
+    UnitOptimFlags {
+        flow_optim: flow_flags_from_args(args),
+        force_inline: args
+            .force_inline
+            .as_ref()
+            .map(|x| x.clone())
+            .unwrap_or_default(),
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let flow_flags = flow_flags_from_args(&args);
+    let flags = unit_flags_from_args(&args);
     let content = read_to_string(File::open(args.source)?)?;
     let code = parse_stack_code(&content);
     let mut unit = Unit::analyze(code.into_iter());
-    unit.optimize(flow_flags);
+    unit.optimize(flags);
 
     if let Some(out_dir) = args.graphs_dir {
         for (name, flow_graph) in unit.functions.iter() {

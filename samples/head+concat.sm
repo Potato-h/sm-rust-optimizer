@@ -81,3 +81,10 @@ DROP
 LABEL L7, 0
 LABEL L6, 0
 END
+
+BEGIN LA_foo, 2, 0, 0
+LD arg[0]
+LD arg[1]
+CALL LA_concat, 2
+CALL LA_head, 1
+END
