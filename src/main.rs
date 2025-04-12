@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::fmt::{self, Write};
+use std::fmt::{self, Display, Write};
 use std::fs::{self, File};
 use std::io::read_to_string;
 use std::path::PathBuf;
@@ -54,10 +54,31 @@ impl Op {
     }
 }
 
+impl Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Op::Plus => write!(f, "+"),
+            Op::Minus => write!(f, "-"),
+            Op::Mul => write!(f, "*"),
+            Op::Eq => write!(f, "=="),
+            Op::Gt => write!(f, ">"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Sym {
     Arg(u16),
     Loc(u16),
+}
+
+impl Display for Sym {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Sym::Arg(v) => write!(f, "arg[{v}]"),
+            Sym::Loc(v) => write!(f, "loc[{v}]"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +92,22 @@ enum LinInst {
     SExp(Ident, usize),
     Dup,
     Drop,
+}
+
+impl Display for LinInst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinInst::Const(v) => write!(f, "CONST {v}"),
+            LinInst::Elem => write!(f, "ELEM"),
+            LinInst::Store(sym) => write!(f, "ST {sym}"),
+            LinInst::Load(sym) => write!(f, "LD {sym}"),
+            LinInst::BinOp(op) => write!(f, "BINOP {op}"),
+            LinInst::Tag(t, args) => write!(f, "PATT Tag ({t}, {args})"),
+            LinInst::SExp(t, args) => write!(f, "SEXP {t}, {args}"),
+            LinInst::Dup => write!(f, "DUP"),
+            LinInst::Drop => write!(f, "DROP"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +128,22 @@ impl FlowInst {
             self,
             FlowInst::Jmp(JumpMode::NonZero, _) | FlowInst::Jmp(JumpMode::Zero, _)
         )
+    }
+}
+
+impl Display for FlowInst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FlowInst::Jmp(mode, label) => match mode {
+                JumpMode::Unconditional => write!(f, "JMP {label}"),
+                JumpMode::Zero => write!(f, "CJMP z, {label}"),
+                JumpMode::NonZero => write!(f, "CJMP n, {label}"),
+            },
+            FlowInst::Label(label) => write!(f, "LABEL {label}"),
+            FlowInst::Call(name, args) => write!(f, "CALL {name}, {args}"),
+            FlowInst::Begin(name) => write!(f, "BEGIN {name}"),
+            FlowInst::End => write!(f, "END"),
+        }
     }
 }
 
@@ -205,6 +258,15 @@ impl Inst {
                 Some(FlowInst(FlowInst::Call(name, num)))
             }
             _ => panic!("unknown command"),
+        }
+    }
+}
+
+impl Display for Inst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Inst::LinInst(inst) => inst.fmt(f),
+            Inst::FlowInst(inst) => inst.fmt(f),
         }
     }
 }
@@ -773,6 +835,151 @@ impl DataGraph {
             .map(|(k, v)| (sym_shift(k, first_free_loc, args_count), v))
             .collect();
     }
+
+    // FIXME: need to somehow recognize and drop unused stack variables.
+    fn compile(&self) -> Vec<LinInst> {
+        fn compile_node(
+            node: NodeIndex,
+            dag: &StableGraph<DataVertex, ArgStackOffset>,
+            symbolics: &BTreeMap<Sym, NodeIndex>,
+            already_compiled: &mut BTreeMap<NodeIndex, u16>,
+            free_loc: &mut u16,
+            code: &mut Vec<LinInst>,
+        ) {
+            eprintln!("compile: {:?}", dag[node]);
+
+            if let Some(&loc) = already_compiled.get(&node) {
+                code.push(LinInst::Load(Sym::Loc(loc)));
+                return;
+            }
+
+            for dep in dag
+                .edges_directed(node, Direction::Incoming)
+                .sorted_by_key(|e| e.weight())
+                .rev()
+            {
+                compile_node(
+                    dep.source(),
+                    dag,
+                    symbolics,
+                    already_compiled,
+                    free_loc,
+                    code,
+                );
+            }
+
+            match &dag[node] {
+                DataVertex::Symbolic(sym) => {
+                    code.push(LinInst::Load(*sym));
+                }
+                DataVertex::StackVar(_) => {
+                    // NOTE: should be careful here, invariants of analyzed stack machine code
+                    // says that stack variable can only appear with "natural" computations, i. e.
+                    // doesn't need to shift anything, but can add assertion
+                }
+                DataVertex::OpResult(inst) => {
+                    code.push(inst.clone());
+                }
+            }
+
+            let used_multiple_times = dag.edges_directed(node, Direction::Outgoing).count() > 1;
+            let used_for_store_output_sym = symbolics.values().contains(&node);
+            let was_saved = already_compiled.contains_key(&node);
+
+            if (used_multiple_times || used_for_store_output_sym) && !was_saved {
+                let save = *free_loc;
+                code.push(LinInst::Store(Sym::Loc(save)));
+                eprintln!("save loc[{save}] for {:?}", dag[node]);
+                *free_loc += 1;
+                already_compiled.insert(node, save);
+            }
+        }
+
+        let output_nodes: BTreeSet<_> = self
+            .outputs
+            .stack
+            .iter()
+            .cloned()
+            .chain(self.jump_decided_by)
+            .collect();
+
+        let mut code = Vec::new();
+        let mut already_compiled = BTreeMap::new();
+        let mut free_loc = self
+            .symbolics
+            .keys()
+            .filter_map(|k| match k {
+                Sym::Loc(x) => Some(x + 1),
+                Sym::Arg(_) => None,
+            })
+            .max()
+            .unwrap_or(0);
+
+        // Dirty hack: load all stack input in local variables to avoid
+        // problems with extracting right stack variable at the end of
+        // `compile_node` recursion.
+        for (input, _) in self
+            .inputs
+            .iter()
+            .filter_map(|&v| match self.dag[v] {
+                DataVertex::StackVar(offset) => Some((v, offset)),
+                _ => None,
+            })
+            .sorted_by_key(|(_, offset)| *offset)
+        {
+            code.push(LinInst::Store(Sym::Loc(free_loc)));
+            code.push(LinInst::Drop);
+            already_compiled.insert(input, free_loc);
+            free_loc += 1;
+        }
+
+        // FIXME: need to compile dead nodes early to drop unused stack variables, but
+        // this can backfire if unused stack input variable in between used.
+        let dead_nodes = self
+            .dag
+            .node_indices()
+            .filter(|v| !output_nodes.contains(v))
+            .filter(|&v| self.dag.edges_directed(v, Direction::Outgoing).count() == 0);
+
+        for node in dead_nodes {
+            compile_node(
+                node,
+                &self.dag,
+                &self.symbolics,
+                &mut already_compiled,
+                &mut free_loc,
+                &mut code,
+            );
+
+            // TODO: Do we need to always do this?
+            code.push(LinInst::Drop);
+        }
+
+        for &node in output_nodes.iter() {
+            compile_node(
+                node,
+                &self.dag,
+                &self.symbolics,
+                &mut already_compiled,
+                &mut free_loc,
+                &mut code,
+            );
+        }
+
+        // Store all needed variables only after computations within expression
+        // to avoid mess up intermediate references to variables.
+        for (sym, node) in self.symbolics.iter() {
+            eprintln!("Try to find local tmp value for {sym} in {already_compiled:?}");
+            let saved = already_compiled[node];
+            code.extend([
+                LinInst::Load(Sym::Loc(saved)),
+                LinInst::Store(*sym),
+                LinInst::Drop,
+            ]);
+        }
+
+        code
+    }
 }
 
 fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
@@ -1094,6 +1301,81 @@ impl FlowGraph {
             }
         }
     }
+
+    fn get_label(&self, node: NodeIndex) -> String {
+        match &self.graph[node] {
+            FlowVertex::LinearBlock(block) => block.start_label.clone(),
+            FlowVertex::Call(name, _) => format!("{name}{}", node.index()),
+        }
+    }
+
+    fn compile(&self) -> Vec<Inst> {
+        let mut code = Vec::new();
+
+        fn compile_vertex(flow: &FlowGraph, node: NodeIndex, code: &mut Vec<Inst>) {
+            code.push(Inst::FlowInst(FlowInst::Label(flow.get_label(node))));
+
+            match &flow.graph[node] {
+                FlowVertex::LinearBlock(block) => {
+                    code.extend(block.compile().into_iter().map(Inst::LinInst));
+                }
+                FlowVertex::Call(name, args) => {
+                    code.push(Inst::FlowInst(FlowInst::Call(name.clone(), *args)));
+                }
+            }
+
+            // FIXME: dirty hack -- now that there is only one unconditional jump or
+            // 2 jumps with different conditions. This loop occurs because of poor
+            // choice of graph representation.
+            for (i, jmp) in flow
+                .graph
+                .edges_directed(node, Direction::Outgoing)
+                .enumerate()
+            {
+                let mode = match jmp.weight() {
+                    _ if i > 0 => JumpMode::Unconditional,
+                    JumpCondition::Unconditional => JumpMode::Unconditional,
+                    JumpCondition::Zero => JumpMode::Zero,
+                    JumpCondition::NonZero => JumpMode::NonZero,
+                };
+
+                code.push(Inst::FlowInst(FlowInst::Jmp(
+                    mode,
+                    flow.get_label(jmp.target()),
+                )));
+            }
+        }
+
+        compile_vertex(self, self.input, &mut code);
+
+        for vertex in self
+            .graph
+            .node_indices()
+            .filter(|v| *v != self.input)
+            .filter(|v| !self.outputs.contains(v))
+        {
+            compile_vertex(self, vertex, &mut code);
+        }
+
+        for &output in self.outputs.iter() {
+            compile_vertex(self, output, &mut code);
+            code.push(Inst::FlowInst(FlowInst::Jmp(
+                JumpMode::Unconditional,
+                String::from("exit"),
+            )));
+        }
+
+        code.push(Inst::FlowInst(FlowInst::Label(String::from("exit"))));
+        code
+    }
+}
+
+fn write_code<W: Write>(w: &mut W, code: &[Inst]) -> fmt::Result {
+    for inst in code.iter() {
+        writeln!(w, "{inst}")?;
+    }
+
+    Ok(())
 }
 
 fn gen_inline_call_prologue(label: String, args: u16, first_free_loc: u16) -> DataGraph {
@@ -1144,6 +1426,18 @@ impl Unit {
             });
         }
     }
+
+    fn compile(&self) -> Vec<Inst> {
+        let mut code = Vec::new();
+
+        for (name, function) in self.functions.iter() {
+            code.push(Inst::FlowInst(FlowInst::Begin(name.clone())));
+            code.extend(function.compile());
+            code.push(Inst::FlowInst(FlowInst::End));
+        }
+
+        code
+    }
 }
 
 struct Escaper<W>(W);
@@ -1191,8 +1485,19 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
     }
 
     for node in graph.dag.node_indices() {
+        let node_symbolics = graph
+            .symbolics
+            .iter()
+            .filter(|(_, v)| node == **v)
+            .map(|(sym, _)| sym)
+            .collect_vec();
+
         write!(w, "sub{label}{} [label = \"", node.index(),)?;
-        write!(Escaper(&mut *w), "{:?}", &graph.dag[node])?;
+        write!(
+            Escaper(&mut *w),
+            "{:?}; {node_symbolics:?}",
+            &graph.dag[node]
+        )?;
         writeln!(
             w,
             "\" {}];",
@@ -1367,7 +1672,7 @@ fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let flags = unit_flags_from_args(&args);
-    let content = read_to_string(File::open(args.source)?)?;
+    let content = read_to_string(File::open(&args.source)?)?;
     let code = parse_stack_code(&content);
     let mut unit = Unit::analyze(code.into_iter());
     unit.optimize(flags);
@@ -1379,6 +1684,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             fs::write(out_dir.join(name).with_extension("dot"), buffer)?;
         }
     }
+
+    let mut buffer = String::new();
+    write_code(&mut buffer, &unit.compile())?;
+    fs::write(args.source.with_extension("osm"), buffer)?;
 
     Ok(())
 }
