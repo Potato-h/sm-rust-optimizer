@@ -1,0 +1,187 @@
+BEGIN LProducer_consumer
+LABEL Line_5
+LD arg[0]
+ST loc[1]
+LD arg[0]
+PATT Tag (Foo, 1)
+LD loc[1]
+ST arg[0]
+DROP
+LD loc[1]
+ST loc[0]
+DROP
+CJMP n, Line_20
+JMP L33
+LABEL Line_20
+DROP
+LD loc[0]
+ST loc[5]
+CONST 0
+ELEM
+ST loc[6]
+LD loc[5]
+ST loc[0]
+DROP
+LD loc[6]
+ST loc[4]
+DROP
+JMP L13
+LABEL L33
+PATT Tag (Bar, 1)
+CJMP z, L15
+JMP Line_38
+LABEL Line_38
+DROP
+LD loc[0]
+ST loc[4]
+CONST 0
+ELEM
+ST loc[5]
+LD loc[4]
+ST loc[0]
+DROP
+LD loc[5]
+ST loc[3]
+DROP
+JMP L13
+LABEL L15
+PATT Tag (Baz, 2)
+CJMP z, L14
+JMP Line_67
+LABEL Line_67
+DROP
+LD loc[0]
+ST loc[3]
+CONST 0
+ELEM
+ST loc[4]
+LD loc[0]
+CONST 1
+ELEM
+ST loc[5]
+BINOP +
+LD loc[3]
+ST loc[0]
+DROP
+LD loc[5]
+ST loc[1]
+DROP
+LD loc[4]
+ST loc[2]
+DROP
+JMP L13
+LABEL L14
+JMP L13
+LABEL L13
+JMP exit
+LABEL exit
+END
+BEGIN LProducer_example
+LABEL Line_2
+LD arg[0]
+ST loc[1]
+LD arg[0]
+LD arg[0]
+BINOP +
+SEXP Baz, 2
+DROP
+LD loc[0]
+ST loc[2]
+LD loc[0]
+PATT Tag (Foo, 1)
+LD loc[1]
+ST arg[0]
+DROP
+LD loc[2]
+ST loc[0]
+DROP
+CJMP n, Line_20
+JMP L33
+LABEL L33
+PATT Tag (Bar, 1)
+CJMP z, L15
+JMP Line_38
+LABEL Line_20
+DROP
+LD loc[1]
+ST loc[6]
+CONST 0
+ELEM
+ST loc[7]
+LD loc[6]
+ST loc[1]
+DROP
+LD loc[7]
+ST loc[5]
+DROP
+JMP L13
+LABEL Line_38
+DROP
+LD loc[1]
+ST loc[5]
+CONST 0
+ELEM
+ST loc[6]
+LD loc[5]
+ST loc[1]
+DROP
+LD loc[6]
+ST loc[4]
+DROP
+JMP L13
+LABEL L15
+PATT Tag (Baz, 2)
+CJMP z, L14
+JMP Line_67
+LABEL Line_67
+DROP
+LD loc[1]
+ST loc[4]
+CONST 0
+ELEM
+ST loc[5]
+LD loc[1]
+CONST 1
+ELEM
+ST loc[6]
+BINOP +
+LD loc[4]
+ST loc[1]
+DROP
+LD loc[6]
+ST loc[2]
+DROP
+LD loc[5]
+ST loc[3]
+DROP
+JMP L13
+LABEL L14
+JMP L13
+LABEL L13
+JMP exit
+LABEL exit
+END
+BEGIN LProducer_producer
+LABEL Line_6
+LD arg[0]
+ST loc[0]
+LD arg[0]
+LD arg[0]
+BINOP +
+SEXP Baz, 2
+LD loc[0]
+ST arg[0]
+DROP
+LABEL Line_6
+LD arg[0]
+ST loc[0]
+LD arg[0]
+LD arg[0]
+BINOP +
+SEXP Baz, 2
+LD loc[0]
+ST arg[0]
+DROP
+JMP exit
+LABEL exit
+END

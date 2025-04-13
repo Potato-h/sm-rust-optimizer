@@ -1,0 +1,8 @@
+BEGIN LA_example, 2, 3, 0
+LD loc[3]
+ST loc[4]
+DROP
+CONST 1
+ST loc[3]
+LD loc[4]
+END

@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Write};
 use std::fs::{self, File};
 use std::io::read_to_string;
+use std::mem;
 use std::path::PathBuf;
-use std::{iter, mem};
 
 use clap::Parser;
 use either::Either::{self, Left, Right};
@@ -38,8 +38,14 @@ enum Op {
     Plus,
     Minus,
     Mul,
+    Div,
+    Mod,
     Eq,
     Gt,
+    GtEq,
+    Lt,
+    LtEq,
+    NotEq,
 }
 
 impl Op {
@@ -50,6 +56,12 @@ impl Op {
             Op::Mul => lhs * rhs,
             Op::Eq => (lhs == rhs) as i32,
             Op::Gt => (lhs > rhs) as i32,
+            Op::Lt => (lhs < rhs) as i32,
+            Op::Div => lhs / rhs,
+            Op::Mod => lhs % rhs,
+            Op::GtEq => (lhs >= rhs) as i32,
+            Op::LtEq => (lhs <= rhs) as i32,
+            Op::NotEq => (lhs != rhs) as i32,
         }
     }
 }
@@ -60,16 +72,23 @@ impl Display for Op {
             Op::Plus => write!(f, "+"),
             Op::Minus => write!(f, "-"),
             Op::Mul => write!(f, "*"),
+            Op::Div => write!(f, "/"),
+            Op::Mod => write!(f, "%"),
             Op::Eq => write!(f, "=="),
             Op::Gt => write!(f, ">"),
+            Op::Lt => write!(f, "<"),
+            Op::GtEq => write!(f, ">="),
+            Op::LtEq => write!(f, "<="),
+            Op::NotEq => write!(f, "!="),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Sym {
     Arg(u16),
     Loc(u16),
+    Glb(Ident),
 }
 
 impl Display for Sym {
@@ -77,6 +96,7 @@ impl Display for Sym {
         match self {
             Sym::Arg(v) => write!(f, "arg[{v}]"),
             Sym::Loc(v) => write!(f, "loc[{v}]"),
+            Sym::Glb(id) => write!(f, "{id}"),
         }
     }
 }
@@ -111,6 +131,14 @@ impl Display for LinInst {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct Begin {
+    name: Ident,
+    args: u32,
+    locs: u32,
+    clos: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FlowInst {
     Jmp(JumpMode, Ident),
     Label(Ident),
@@ -118,7 +146,7 @@ enum FlowInst {
     // arbitrary change of global variables. And after unfolding it can
     // have control flow instruction which weird to extract from lin block
     Call(Ident, usize),
-    Begin(Ident),
+    Begin(Begin),
     End,
 }
 
@@ -137,12 +165,48 @@ impl Display for FlowInst {
             FlowInst::Jmp(mode, label) => match mode {
                 JumpMode::Unconditional => write!(f, "JMP {label}"),
                 JumpMode::Zero => write!(f, "CJMP z, {label}"),
-                JumpMode::NonZero => write!(f, "CJMP n, {label}"),
+                JumpMode::NonZero => write!(f, "CJMP nz, {label}"),
             },
-            FlowInst::Label(label) => write!(f, "LABEL {label}"),
+            FlowInst::Label(label) => write!(f, "LABEL {label}, 0"),
             FlowInst::Call(name, args) => write!(f, "CALL {name}, {args}"),
-            FlowInst::Begin(name) => write!(f, "BEGIN {name}"),
+            FlowInst::Begin(begin) => write!(
+                f,
+                "BEGIN {}, {}, {}, {}",
+                begin.name, begin.args, begin.locs, begin.clos
+            ),
             FlowInst::End => write!(f, "END"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Public {
+    Val(Ident, Ident),
+    Var(Ident, Ident),
+    Fun(Ident, Ident, u64),
+}
+
+impl fmt::Display for Public {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Public::Val(unit, ident) => write!(f, "PUBLIC Val ({unit}, {ident})"),
+            Public::Var(unit, ident) => write!(f, "PUBLIC Var ({unit}, {ident})"),
+            Public::Fun(unit, ident, args) => write!(f, "PUBLIC Fun ({unit}, {ident}, {args})"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Decl {
+    Global(Ident),
+    Public(Public),
+}
+
+impl fmt::Display for Decl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Decl::Global(var) => write!(f, "GLOBAL {var}"),
+            Decl::Public(public) => public.fmt(f),
         }
     }
 }
@@ -168,6 +232,7 @@ struct FlowOptimFlags {
 enum Inst {
     LinInst(LinInst),
     FlowInst(FlowInst),
+    Decl(Decl),
 }
 
 impl Inst {
@@ -182,28 +247,44 @@ impl Inst {
 
         match tokens.next()? {
             "BEGIN" => {
-                let name = tokens.next()?;
-                Some(FlowInst(FlowInst::Begin(name.to_string())))
+                let name = tokens.next()?.to_string();
+                let args = tokens.next()?.parse().ok()?;
+                let locs = tokens.next()?.parse().ok()?;
+                let clos = tokens.next()?.parse().ok()?;
+                Some(FlowInst(FlowInst::Begin(Begin {
+                    name,
+                    args,
+                    locs,
+                    clos,
+                })))
             }
             "END" => Some(FlowInst(FlowInst::End)),
             "LD" => {
-                let typ = tokens.next()?;
-                let id = tokens.next()?.parse().ok()?;
-                let sym = match typ {
-                    "arg" => Some(Sym::Arg(id)),
-                    "loc" => Some(Sym::Loc(id)),
-                    _ => None,
+                let sym = match tokens.next()? {
+                    "arg" => {
+                        let id = tokens.next()?.parse().ok()?;
+                        Some(Sym::Arg(id))
+                    }
+                    "loc" => {
+                        let id = tokens.next()?.parse().ok()?;
+                        Some(Sym::Arg(id))
+                    }
+                    other => Some(Sym::Glb(other.to_string())),
                 }?;
 
                 Some(LinInst(LinInst::Load(sym)))
             }
             "ST" => {
-                let typ = tokens.next()?;
-                let id = tokens.next()?.parse().ok()?;
-                let sym = match typ {
-                    "arg" => Some(Sym::Arg(id)),
-                    "loc" => Some(Sym::Loc(id)),
-                    _ => None,
+                let sym = match tokens.next()? {
+                    "arg" => {
+                        let id = tokens.next()?.parse().ok()?;
+                        Some(Sym::Arg(id))
+                    }
+                    "loc" => {
+                        let id = tokens.next()?.parse().ok()?;
+                        Some(Sym::Arg(id))
+                    }
+                    other => Some(Sym::Glb(other.to_string())),
                 }?;
 
                 Some(LinInst(LinInst::Store(sym)))
@@ -222,8 +303,14 @@ impl Inst {
                 Some("+") => Some(LinInst(LinInst::BinOp(Op::Plus))),
                 Some("-") => Some(LinInst(LinInst::BinOp(Op::Minus))),
                 Some("*") => Some(LinInst(LinInst::BinOp(Op::Mul))),
+                Some("/") => Some(LinInst(LinInst::BinOp(Op::Div))),
+                Some("%") => Some(LinInst(LinInst::BinOp(Op::Mod))),
                 Some("==") => Some(LinInst(LinInst::BinOp(Op::Eq))),
                 Some(">") => Some(LinInst(LinInst::BinOp(Op::Gt))),
+                Some(">=") => Some(LinInst(LinInst::BinOp(Op::GtEq))),
+                Some("<") => Some(LinInst(LinInst::BinOp(Op::Lt))),
+                Some("<=") => Some(LinInst(LinInst::BinOp(Op::LtEq))),
+                Some("!=") => Some(LinInst(LinInst::BinOp(Op::NotEq))),
                 x => panic!("unknown binary op: {x:?}"),
             },
             "JMP" => {
@@ -257,7 +344,30 @@ impl Inst {
                 let num = tokens.next()?.parse().ok()?;
                 Some(FlowInst(FlowInst::Call(name, num)))
             }
-            _ => panic!("unknown command"),
+            "PUBLIC" => match tokens.next()? {
+                "Val" => {
+                    let unit = tokens.next()?.to_string();
+                    let name = tokens.next()?.to_string();
+                    Some(Decl(Decl::Public(Public::Val(unit, name))))
+                }
+                "Var" => {
+                    let unit = tokens.next()?.to_string();
+                    let name = tokens.next()?.to_string();
+                    Some(Decl(Decl::Public(Public::Var(unit, name))))
+                }
+                "Fun" => {
+                    let unit = tokens.next()?.to_string();
+                    let name = tokens.next()?.to_string();
+                    let args = tokens.next()?.parse().ok()?;
+                    Some(Decl(Decl::Public(Public::Fun(unit, name, args))))
+                }
+                _ => panic!("unknown public"),
+            },
+            "GLOBAL" => {
+                let global = tokens.next()?.to_string();
+                Some(Decl(Decl::Global(global)))
+            }
+            other => panic!("unknown command: s{other}"),
         }
     }
 }
@@ -267,6 +377,7 @@ impl Display for Inst {
         match self {
             Inst::LinInst(inst) => inst.fmt(f),
             Inst::FlowInst(inst) => inst.fmt(f),
+            Inst::Decl(decl) => decl.fmt(f),
         }
     }
 }
@@ -300,9 +411,9 @@ impl DataGraph {
     fn args_count(&self) -> u16 {
         self.symbolics
             .keys()
-            .filter_map(|&x| match x {
+            .filter_map(|x| match x {
                 Sym::Arg(x) => Some(x + 1),
-                Sym::Loc(_) => None,
+                _ => None,
             })
             .max()
             .unwrap_or(0)
@@ -311,9 +422,9 @@ impl DataGraph {
     fn locs_count(&self) -> u16 {
         self.symbolics
             .keys()
-            .filter_map(|&x| match x {
-                Sym::Arg(_) => None,
+            .filter_map(|x| match x {
                 Sym::Loc(x) => Some(x + 1),
+                _ => None,
             })
             .max()
             .unwrap_or(0)
@@ -452,7 +563,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         match inst {
             LinInst::Const(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::Elem => n_arity_inst(&mut dag, &mut stack, 2, inst),
-            LinInst::Store(sym) => {
+            LinInst::Store(ref sym) => {
                 let node = dag.add_node(inst_vertex(&inst));
                 let from = match stack.peek() {
                     Left(v) => {
@@ -464,12 +575,12 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
                     Right(node) => node,
                 };
                 dag.add_edge(from, node, 0);
-                symbolics.insert(sym, node);
+                symbolics.insert(sym.clone(), node);
             }
-            LinInst::Load(sym) => {
+            LinInst::Load(ref sym) => {
                 if !symbolics.contains_key(&sym) {
-                    let node = dag.add_node(DataVertex::Symbolic(sym));
-                    symbolics.insert(sym, node);
+                    let node = dag.add_node(DataVertex::Symbolic(sym.clone()));
+                    symbolics.insert(sym.clone(), node);
                 }
 
                 stack.push(symbolics[&sym]);
@@ -610,7 +721,7 @@ impl DataGraph {
             if let Some(sym_in_source) = self.symbolics.get(name) {
                 // If source block has symbolic value, then just change node
                 // description to store operation from last symbolic value in source
-                self.dag[sym] = DataVertex::OpResult(LinInst::Store(*name));
+                self.dag[sym] = DataVertex::OpResult(LinInst::Store(name.clone()));
                 self.dag.add_edge(*sym_in_source, sym, 0);
             } else {
                 // Otherwise keep symbolic input node
@@ -618,7 +729,7 @@ impl DataGraph {
             }
 
             self.symbolics
-                .insert(*name, ext_to_source[&ext.symbolics[name]]);
+                .insert(name.clone(), ext_to_source[&ext.symbolics[name]]);
         }
 
         self.jump_decided_by = ext.jump_decided_by.as_ref().map(|id| ext_to_source[id]);
@@ -763,6 +874,7 @@ impl DataGraph {
                 .dag
                 .edges_directed(node, Direction::Incoming)
                 .sorted_by_key(|edge| edge.weight())
+                .rev()
                 .filter_map(|edge| match self.dag[edge.source()] {
                     DataVertex::OpResult(LinInst::Const(v)) => Some(v),
                     _ => None,
@@ -825,7 +937,9 @@ impl DataGraph {
     fn shift_symbolics_for_inline(&mut self, first_free_loc: u16, args_count: u16) {
         for node in self.dag.node_weights_mut() {
             match node {
-                DataVertex::Symbolic(sym) => *sym = sym_shift(*sym, first_free_loc, args_count),
+                DataVertex::Symbolic(sym) => {
+                    *sym = sym_shift(sym.clone(), first_free_loc, args_count)
+                }
                 _ => {}
             }
         }
@@ -870,7 +984,7 @@ impl DataGraph {
 
             match &dag[node] {
                 DataVertex::Symbolic(sym) => {
-                    code.push(LinInst::Load(*sym));
+                    code.push(LinInst::Load(sym.clone()));
                 }
                 DataVertex::StackVar(_) => {
                     // NOTE: should be careful here, invariants of analyzed stack machine code
@@ -910,7 +1024,7 @@ impl DataGraph {
             .keys()
             .filter_map(|k| match k {
                 Sym::Loc(x) => Some(x + 1),
-                Sym::Arg(_) => None,
+                _ => None,
             })
             .max()
             .unwrap_or(0);
@@ -973,7 +1087,7 @@ impl DataGraph {
             let saved = already_compiled[node];
             code.extend([
                 LinInst::Load(Sym::Loc(saved)),
-                LinInst::Store(*sym),
+                LinInst::Store(sym.clone()),
                 LinInst::Drop,
             ]);
         }
@@ -986,6 +1100,7 @@ fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
     match sym {
         Sym::Arg(i) => Sym::Loc(first_free_loc + i),
         Sym::Loc(i) => Sym::Loc(first_free_loc + args_count + i),
+        Sym::Glb(glb) => Sym::Glb(glb),
     }
 }
 
@@ -1189,6 +1304,7 @@ impl FlowGraph {
                         FlowInst::End => break,
                     }
                 }
+                Inst::Decl(_) => {}
             }
         }
 
@@ -1305,7 +1421,10 @@ impl FlowGraph {
     fn get_label(&self, node: NodeIndex) -> String {
         match &self.graph[node] {
             FlowVertex::LinearBlock(block) => block.start_label.clone(),
-            FlowVertex::Call(name, _) => format!("{name}{}", node.index()),
+            FlowVertex::Call(name, _) => {
+                // FIXME: dirty hack, because generated asm don't like labels started with '$'
+                format!("{}{}", name.strip_prefix("$").unwrap_or(name), node.index())
+            }
         }
     }
 
@@ -1375,6 +1494,8 @@ fn write_code<W: Write>(w: &mut W, code: &[Inst]) -> fmt::Result {
         writeln!(w, "{inst}")?;
     }
 
+    writeln!(w, "!!")?;
+
     Ok(())
 }
 
@@ -1395,21 +1516,37 @@ struct UnitOptimFlags {
 #[derive(Debug)]
 struct Unit {
     functions: BTreeMap<Ident, FlowGraph>,
+    declarations: Vec<Decl>,
 }
 
 impl Unit {
-    fn analyze(mut insts: impl Iterator<Item = Inst>) -> Unit {
+    fn analyze(code: impl Iterator<Item = Inst>) -> Unit {
         let mut functions: BTreeMap<Ident, FlowGraph> = BTreeMap::new();
+        let mut declarations = Vec::new();
+        let mut code = code
+            .filter(|inst| match inst {
+                Inst::Decl(decl) => {
+                    declarations.push(decl.clone());
+                    false
+                }
+                _ => true,
+            })
+            .peekable();
 
-        while let Some(FlowInst(FlowInst::Begin(name))) = insts.next() {
-            let code: Vec<_> = iter::once(FlowInst(FlowInst::Begin(name.clone())))
-                .chain((&mut insts).take_while_inclusive(|inst| inst != &FlowInst(FlowInst::End)))
+        while let Some(FlowInst(FlowInst::Label(name))) = code.peek() {
+            let name = name.clone();
+            let code: Vec<_> = (&mut code)
+                .skip(1)
+                .take_while_inclusive(|inst| inst != &FlowInst(FlowInst::End))
                 .collect();
 
             functions.insert(name, FlowGraph::analyze_function(code));
         }
 
-        Unit { functions }
+        Unit {
+            functions,
+            declarations,
+        }
     }
 
     fn optimize(&mut self, flags: UnitOptimFlags) {
@@ -1428,10 +1565,16 @@ impl Unit {
     }
 
     fn compile(&self) -> Vec<Inst> {
-        let mut code = Vec::new();
+        let mut code = self.declarations.iter().cloned().map(Decl).collect_vec();
 
         for (name, function) in self.functions.iter() {
-            code.push(Inst::FlowInst(FlowInst::Begin(name.clone())));
+            code.push(Inst::FlowInst(FlowInst::Label(name.clone())));
+            code.push(Inst::FlowInst(FlowInst::Begin(Begin {
+                name: name.clone(),
+                args: function.args_count() as u32,
+                locs: function.loc_count() as u32,
+                clos: 0,
+            })));
             code.extend(function.compile());
             code.push(Inst::FlowInst(FlowInst::End));
         }
@@ -1673,6 +1816,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let flags = unit_flags_from_args(&args);
     let content = read_to_string(File::open(&args.source)?)?;
+    // eprintln!("Get SM code at rust side:");
+    // eprintln!("{content}");
     let code = parse_stack_code(&content);
     let mut unit = Unit::analyze(code.into_iter());
     unit.optimize(flags);

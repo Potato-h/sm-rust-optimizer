@@ -1,0 +1,23 @@
+PUBLIC Fun ("Test007", Init, 0)
+GLOBAL Test007_x
+GLOBAL Test007_y
+GLOBAL Test007_z
+LABEL Test007_init, 0
+BEGIN Test007_init, 0, 0, 0
+CONST 1
+ST Test007_x
+DROP
+CONST 2
+ST Test007_y
+DROP
+LD Test007_x
+LD Test007_y
+BINOP -
+CONST 3
+BINOP -
+ST Test007_z
+DROP
+LD Test007_z
+CALL $Std_write, 1
+DROP
+END

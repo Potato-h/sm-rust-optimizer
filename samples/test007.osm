@@ -1,0 +1,37 @@
+PUBLIC Fun ("Test007", Init, 0)
+GLOBAL Test007_x
+GLOBAL Test007_y
+GLOBAL Test007_z
+LABEL Test007_init, 0
+BEGIN Test007_init, 0, 0, 0
+LABEL Line_15, 0
+CONST 1
+ST loc[0]
+DROP
+CONST 2
+ST loc[1]
+DROP
+CONST -4
+ST loc[2]
+LD loc[0]
+ST Test007_x
+DROP
+LD loc[1]
+ST Test007_y
+DROP
+LD loc[2]
+ST Test007_z
+DROP
+JMP Std_write1
+LABEL Std_write1, 0
+CALL $Std_write, 1
+JMP Line_17
+LABEL Line_17, 0
+ST loc[0]
+DROP
+LD loc[0]
+DROP
+JMP exit
+LABEL exit, 0
+END
+!!

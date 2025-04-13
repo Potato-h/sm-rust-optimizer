@@ -1,0 +1,84 @@
+PUBLIC Fun ("Test009", Init, 0)
+GLOBAL Test009_n
+GLOBAL Test009_k
+GLOBAL Test009_res
+LABEL Test009_init, 0
+BEGIN Test009_init, 0, 0, 0
+LABEL Line_10, 0
+CONST 2
+ST Test009_n
+ST loc[0]
+DROP
+CONST 10
+ST Test009_k
+ST loc[1]
+DROP
+CONST 1
+ST Test009_res
+ST loc[2]
+DROP
+LD loc[1]
+ST Test009_k
+DROP
+LD loc[0]
+ST Test009_n
+DROP
+LD loc[2]
+ST Test009_res
+DROP
+JMP L16
+LABEL Line_11, 0
+JMP L15
+LABEL L15, 0
+LD Test009_res
+LD Test009_n
+ST loc[0]
+BINOP *
+ST Test009_res
+ST loc[1]
+DROP
+LD Test009_k
+CONST 1
+BINOP -
+ST Test009_k
+ST loc[2]
+DROP
+LD loc[2]
+ST Test009_k
+DROP
+LD loc[0]
+ST Test009_n
+DROP
+LD loc[1]
+ST Test009_res
+DROP
+JMP L16
+LABEL L16, 0
+LD Test009_k
+ST loc[0]
+CONST 0
+BINOP >
+LD loc[0]
+ST Test009_k
+DROP
+CJMP nz, L15
+JMP Line_28
+LABEL Line_28, 0
+LD Test009_res
+ST loc[0]
+LD loc[0]
+ST Test009_res
+DROP
+JMP Std_write5
+LABEL Std_write5, 0
+CALL $Std_write, 1
+JMP Line_30
+LABEL Line_30, 0
+ST loc[0]
+DROP
+LD loc[0]
+DROP
+JMP exit
+LABEL exit, 0
+END
+!!

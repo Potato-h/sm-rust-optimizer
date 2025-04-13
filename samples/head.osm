@@ -1,0 +1,45 @@
+BEGIN LA_head
+LABEL Line_5
+LD arg[0]
+ST loc[1]
+LD loc[1]
+PATT Tag (cons, 2)
+LD loc[1]
+ST arg[0]
+DROP
+LD loc[1]
+ST loc[0]
+DROP
+CJMP n, Line_29
+JMP L36
+LABEL Line_29
+ST loc[3]
+DROP
+LD loc[3]
+DROP
+LD loc[0]
+ST loc[4]
+CONST 1
+ELEM
+ST loc[5]
+DROP
+LD loc[4]
+CONST 0
+ELEM
+ST loc[6]
+LD loc[4]
+ST loc[0]
+DROP
+LD loc[5]
+ST loc[1]
+DROP
+LD loc[6]
+ST loc[2]
+DROP
+JMP L35
+LABEL L36
+JMP L35
+LABEL L35
+JMP exit
+LABEL exit
+END

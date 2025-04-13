@@ -1,0 +1,26 @@
+BEGIN LA_example
+LABEL Line_7
+LD loc[3]
+ST loc[5]
+CONST 1
+ST loc[6]
+LD loc[6]
+ST loc[3]
+DROP
+LD loc[5]
+ST loc[4]
+DROP
+LABEL Line_7
+LD loc[3]
+ST loc[5]
+CONST 1
+ST loc[6]
+LD loc[6]
+ST loc[3]
+DROP
+LD loc[5]
+ST loc[4]
+DROP
+JMP exit
+LABEL exit
+END

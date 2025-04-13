@@ -1,0 +1,87 @@
+BEGIN LProducer_producer, 1, 0, 0
+LD arg[0]
+LD arg[0]
+LD arg[0]
+BINOP +
+SEXP "Baz", 2
+END
+
+BEGIN LProducer_consumer, 1, 5, 0
+LD arg[0]
+ST loc[0]
+DROP
+LD loc[0]
+LABEL L41, 0
+DUP
+PATT Tag ("Foo", 1)
+CJMP z, L33
+DUP
+CONST 0
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[4]
+DROP
+LD loc[4]
+JMP L13
+LABEL L33_drop_1, 0
+DROP
+LABEL L33, 0
+DUP
+PATT Tag ("Bar", 1)
+CJMP z, L15
+DUP
+CONST 0
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[3]
+DROP
+LD loc[3]
+JMP L13
+LABEL L15_drop_1, 0
+DROP
+LABEL L15, 0
+DUP
+PATT Tag ("Baz", 2)
+CJMP z, L14
+DUP
+CONST 0
+ELEM
+DROP
+DUP
+CONST 1
+ELEM
+DROP
+DROP
+LD loc[0]
+CONST 1
+ELEM
+ST loc[1]
+DROP
+LD loc[0]
+CONST 0
+ELEM
+ST loc[2]
+DROP
+LD loc[2]
+LD loc[1]
+BINOP +
+JMP L13
+LABEL L14_drop_1, 0
+DROP
+LABEL L14, 0
+LABEL L13, 0
+END
+
+BEGIN LProducer_example, 1, 0, 0
+LD arg[0]
+CALL LProducer_producer, 1
+CALL LProducer_consumer, 1
+END

@@ -1,0 +1,36 @@
+PUBLIC Fun ("Test009", Init, 0)
+GLOBAL Test009_n
+GLOBAL Test009_k
+GLOBAL Test009_res
+LABEL Test009_init, 0
+BEGIN Test009_init, 0, 0, 0
+CONST 2
+ST Test009_n
+DROP
+CONST 10
+ST Test009_k
+DROP
+CONST 1
+ST Test009_res
+DROP
+JMP L16
+LABEL L15, 1
+LD Test009_res
+LD Test009_n
+BINOP *
+ST Test009_res
+DROP
+LD Test009_k
+CONST 1
+BINOP -
+ST Test009_k
+DROP
+LABEL L16, 0
+LD Test009_k
+CONST 0
+BINOP >
+CJMP nz, L15
+LD Test009_res
+CALL $Std_write, 1
+DROP
+END
