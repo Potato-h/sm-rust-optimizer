@@ -1842,6 +1842,7 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
 fn parse_stack_code(code: &str) -> Vec<Inst> {
     code.lines()
         .filter(|line| !line.chars().all(char::is_whitespace))
+        .filter(|line| !line.contains("META")) // FIXME: process failed pattern matching
         .map(|line| Inst::parse(line).expect(&format!("Failed to parse: {line}")))
         .collect()
 }
