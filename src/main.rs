@@ -220,6 +220,19 @@ impl fmt::Display for Decl {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct Ctx {
+    free_label: u32,
+}
+
+impl Ctx {
+    fn fresh_label(&mut self) -> String {
+        let label = format!("Lfresh_{}", self.free_label);
+        self.free_label += 1;
+        label
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DataGraphOptimFlags {
     elim_dead_code: bool,
@@ -972,7 +985,7 @@ impl DataGraph {
     }
 
     // FIXME: need to somehow recognize and drop unused stack variables.
-    fn compile(&self) -> Vec<LinInst> {
+    fn compile(&self, free_loc: &mut u16) -> Vec<LinInst> {
         fn compile_node(
             node: NodeIndex,
             dag: &StableGraph<DataVertex, ArgStackOffset>,
@@ -1040,15 +1053,6 @@ impl DataGraph {
 
         let mut code = Vec::new();
         let mut already_compiled = BTreeMap::new();
-        let mut free_loc = self
-            .symbolics
-            .keys()
-            .filter_map(|k| match k {
-                Sym::Loc(x) => Some(x + 1),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
 
         // Dirty hack: load all stack input in local variables to avoid
         // problems with extracting right stack variable at the end of
@@ -1062,10 +1066,10 @@ impl DataGraph {
             })
             .sorted_by_key(|(_, offset)| *offset)
         {
-            code.push(LinInst::Store(Sym::Loc(free_loc)));
+            code.push(LinInst::Store(Sym::Loc(*free_loc)));
             code.push(LinInst::Drop);
-            already_compiled.insert(input, free_loc);
-            free_loc += 1;
+            already_compiled.insert(input, *free_loc);
+            *free_loc += 1;
         }
 
         // FIXME: need to compile dead nodes early to drop unused stack variables, but
@@ -1082,7 +1086,7 @@ impl DataGraph {
                 &self.dag,
                 &self.symbolics,
                 &mut already_compiled,
-                &mut free_loc,
+                free_loc,
                 &mut code,
             );
 
@@ -1096,7 +1100,7 @@ impl DataGraph {
                 &self.dag,
                 &self.symbolics,
                 &mut already_compiled,
-                &mut free_loc,
+                free_loc,
                 &mut code,
             );
         }
@@ -1282,7 +1286,7 @@ impl FlowGraph {
         }
     }
 
-    fn analyze_function(code: Vec<Inst>) -> Self {
+    fn analyze_function(ctx: &mut Ctx, code: Vec<Inst>) -> Self {
         let mut edges: Vec<(NodeIndex, Label, JumpCondition)> = Vec::new();
         let mut edge_from_prev: Option<(NodeIndex, JumpCondition)> = None;
         let mut block: Vec<LinInst> = Vec::new();
@@ -1298,7 +1302,7 @@ impl FlowGraph {
                     block.push(inst);
                 }
                 Inst::FlowInst(inst) => {
-                    let start_label = labeled.take().unwrap_or(format!("Line_{i}"));
+                    let start_label = labeled.take().unwrap_or(ctx.fresh_label());
                     let has_cjmp = inst.conditional_jmp();
                     let this_block =
                         analyze_lin_block(start_label.clone(), mem::take(&mut block), has_cjmp);
@@ -1510,7 +1514,7 @@ impl FlowGraph {
             }
         }
 
-        compile_vertex(self, self.input, &mut code);
+        compile_vertex(self, self.input, &mut code, &mut free_loc);
 
         for vertex in self
             .graph
@@ -1518,19 +1522,22 @@ impl FlowGraph {
             .filter(|v| *v != self.input)
             .filter(|v| !self.outputs.contains(v))
         {
-            compile_vertex(self, vertex, &mut code);
+            compile_vertex(self, vertex, &mut code, &mut free_loc);
         }
 
+        // FIXME: change to get fresh label?
+        let exit_label = format!("{name}_exit");
+
         for &output in self.outputs.iter() {
-            compile_vertex(self, output, &mut code);
+            compile_vertex(self, output, &mut code, &mut free_loc);
             code.push(Inst::FlowInst(FlowInst::Jmp(
                 JumpMode::Unconditional,
-                String::from("exit"),
+                exit_label.clone(),
             )));
         }
 
-        code.push(Inst::FlowInst(FlowInst::Label(String::from("exit"))));
-        code
+        code.push(Inst::FlowInst(FlowInst::Label(exit_label)));
+        (code, self.args_count(), free_loc, 0)
     }
 }
 
@@ -1565,7 +1572,7 @@ struct Unit {
 }
 
 impl Unit {
-    fn analyze(code: impl Iterator<Item = Inst>) -> Unit {
+    fn analyze(ctx: &mut Ctx, code: impl Iterator<Item = Inst>) -> Unit {
         let mut functions: BTreeMap<Ident, FlowGraph> = BTreeMap::new();
         let mut declarations = Vec::new();
         let mut code = code
@@ -1585,7 +1592,7 @@ impl Unit {
                 .take_while_inclusive(|inst| inst != &FlowInst(FlowInst::End))
                 .collect();
 
-            functions.insert(name, FlowGraph::analyze_function(code));
+            functions.insert(name, FlowGraph::analyze_function(ctx, code));
         }
 
         Unit {
@@ -1883,7 +1890,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // eprintln!("Get SM code at rust side:");
     // eprintln!("{content}");
     let code = parse_stack_code(&content);
-    let mut unit = Unit::analyze(code.into_iter());
+    let mut ctx = Ctx::default();
+    let mut unit = Unit::analyze(&mut ctx, code.into_iter());
     unit.optimize(flags);
 
     if let Some(out_dir) = args.graphs_dir {
