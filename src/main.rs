@@ -46,6 +46,7 @@ enum Op {
     Lt,
     LtEq,
     NotEq,
+    And,
 }
 
 impl Op {
@@ -62,6 +63,7 @@ impl Op {
             Op::GtEq => (lhs >= rhs) as i32,
             Op::LtEq => (lhs <= rhs) as i32,
             Op::NotEq => (lhs != rhs) as i32,
+            Op::And => ((lhs != 0) && (rhs != 0)) as i32,
         }
     }
 }
@@ -80,6 +82,7 @@ impl Display for Op {
             Op::GtEq => write!(f, ">="),
             Op::LtEq => write!(f, "<="),
             Op::NotEq => write!(f, "!="),
+            Op::And => write!(f, "&&"),
         }
     }
 }
@@ -110,6 +113,7 @@ enum LinInst {
     BinOp(Op),
     Tag(Ident, usize),
     SExp(Ident, usize),
+    LDA(Sym),
     Dup,
     Drop,
 }
@@ -126,6 +130,7 @@ impl Display for LinInst {
             LinInst::SExp(t, args) => write!(f, "SEXP {t}, {args}"),
             LinInst::Dup => write!(f, "DUP"),
             LinInst::Drop => write!(f, "DROP"),
+            LinInst::LDA(sym) => write!(f, "LDA {sym}"),
         }
     }
 }
@@ -146,6 +151,9 @@ enum FlowInst {
     // arbitrary change of global variables. And after unfolding it can
     // have control flow instruction which weird to extract from lin block
     Call(Ident, usize),
+    // STI command should be in flow graph, because analysis of variable's values
+    // at the end of the linear block
+    STI,
     Begin(Begin),
     End,
 }
@@ -167,8 +175,9 @@ impl Display for FlowInst {
                 JumpMode::Zero => write!(f, "CJMP z, {label}"),
                 JumpMode::NonZero => write!(f, "CJMP nz, {label}"),
             },
-            FlowInst::Label(label) => write!(f, "LABEL {label}, 0"),
+            FlowInst::Label(label) => write!(f, "LABEL {label}, 1"),
             FlowInst::Call(name, args) => write!(f, "CALL {name}, {args}"),
+            FlowInst::STI => write!(f, "STI"),
             FlowInst::Begin(begin) => write!(
                 f,
                 "BEGIN {}, {}, {}, {}",
@@ -236,6 +245,20 @@ enum Inst {
 }
 
 impl Inst {
+    fn parse_sym<'a, I: Iterator<Item = &'a str>>(tokens: &mut I) -> Option<Sym> {
+        match tokens.next()? {
+            "arg" => {
+                let id = tokens.next()?.parse().ok()?;
+                Some(Sym::Arg(id))
+            }
+            "loc" => {
+                let id = tokens.next()?.parse().ok()?;
+                Some(Sym::Loc(id))
+            }
+            other => Some(Sym::Glb(other.to_string())),
+        }
+    }
+
     fn parse(code: &str) -> Option<Inst> {
         let mut tokens = code
             .split(|ch| match ch {
@@ -260,35 +283,18 @@ impl Inst {
             }
             "END" => Some(FlowInst(FlowInst::End)),
             "LD" => {
-                let sym = match tokens.next()? {
-                    "arg" => {
-                        let id = tokens.next()?.parse().ok()?;
-                        Some(Sym::Arg(id))
-                    }
-                    "loc" => {
-                        let id = tokens.next()?.parse().ok()?;
-                        Some(Sym::Arg(id))
-                    }
-                    other => Some(Sym::Glb(other.to_string())),
-                }?;
-
+                let sym = Inst::parse_sym(&mut tokens)?;
                 Some(LinInst(LinInst::Load(sym)))
             }
             "ST" => {
-                let sym = match tokens.next()? {
-                    "arg" => {
-                        let id = tokens.next()?.parse().ok()?;
-                        Some(Sym::Arg(id))
-                    }
-                    "loc" => {
-                        let id = tokens.next()?.parse().ok()?;
-                        Some(Sym::Arg(id))
-                    }
-                    other => Some(Sym::Glb(other.to_string())),
-                }?;
-
+                let sym = Inst::parse_sym(&mut tokens)?;
                 Some(LinInst(LinInst::Store(sym)))
             }
+            "LDA" => {
+                let sym = Inst::parse_sym(&mut tokens)?;
+                Some(LinInst(LinInst::LDA(sym)))
+            }
+            "STI" => Some(FlowInst(FlowInst::STI)),
             "DUP" => Some(LinInst(LinInst::Dup)),
             "DROP" => Some(LinInst(LinInst::Drop)),
             "LABEL" => {
@@ -311,6 +317,7 @@ impl Inst {
                 Some("<") => Some(LinInst(LinInst::BinOp(Op::Lt))),
                 Some("<=") => Some(LinInst(LinInst::BinOp(Op::LtEq))),
                 Some("!=") => Some(LinInst(LinInst::BinOp(Op::NotEq))),
+                Some("&&") => Some(LinInst(LinInst::BinOp(Op::And))),
                 x => panic!("unknown binary op: {x:?}"),
             },
             "JMP" => {
@@ -511,9 +518,22 @@ impl VirtualStack {
 }
 
 #[derive(Debug, Clone)]
+struct CallVertex {
+    label: String,
+    name: String,
+    args: usize,
+}
+
+#[derive(Debug, Clone)]
+struct STIVertex {
+    label: String,
+}
+
+#[derive(Debug, Clone)]
 enum FlowVertex {
     LinearBlock(DataGraph),
-    Call(String, usize),
+    Call(CallVertex),
+    STI(STIVertex),
 }
 
 impl FlowVertex {
@@ -585,6 +605,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
 
                 stack.push(symbolics[&sym]);
             }
+            LinInst::LDA(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
             LinInst::SExp(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
@@ -1112,7 +1133,8 @@ impl FlowGraph {
             .node_weights()
             .filter_map(|v| match v {
                 FlowVertex::LinearBlock(block) => Some(block.args_count()),
-                FlowVertex::Call(_, _) => None,
+                FlowVertex::Call(_) => None,
+                FlowVertex::STI(_) => None,
             })
             .max()
             .unwrap_or(0)
@@ -1123,7 +1145,8 @@ impl FlowGraph {
             .node_weights()
             .filter_map(|v| match v {
                 FlowVertex::LinearBlock(block) => Some(block.locs_count()),
-                FlowVertex::Call(_, _) => None,
+                FlowVertex::Call(_) => None,
+                FlowVertex::STI(_) => None,
             })
             .max()
             .unwrap_or(0)
@@ -1146,7 +1169,8 @@ impl FlowGraph {
             .node_references()
             .filter_map(|(id, block)| match block {
                 FlowVertex::LinearBlock(block) => Some((id, block)),
-                FlowVertex::Call(_, _) => None,
+                FlowVertex::Call(_) => None,
+                FlowVertex::STI(_) => None,
             })
             .filter(|(id, _)| {
                 self.graph
@@ -1163,7 +1187,8 @@ impl FlowGraph {
         {
             match &mut self.graph[node] {
                 FlowVertex::LinearBlock(block) => block.remove_jump_decision(),
-                FlowVertex::Call(_, _) => {}
+                FlowVertex::Call(_) => {}
+                FlowVertex::STI(_) => {}
             }
 
             let outgoings = self
@@ -1202,12 +1227,14 @@ impl FlowGraph {
         {
             let ext = match &self.graph[to] {
                 FlowVertex::LinearBlock(block) => block.clone(),
-                FlowVertex::Call(_, _) => unreachable!("by filter"),
+                FlowVertex::Call(_) => unreachable!("by filter"),
+                FlowVertex::STI(_) => unreachable!("by filter"),
             };
 
             match &mut self.graph[from] {
                 FlowVertex::LinearBlock(block) => block.extend(&ext),
-                FlowVertex::Call(_, _) => unreachable!("by filter"),
+                FlowVertex::Call(_) => unreachable!("by filter"),
+                FlowVertex::STI(_) => unreachable!("by filter"),
             }
 
             let outgoings = self
@@ -1235,7 +1262,8 @@ impl FlowGraph {
             for block in self.graph.node_weights_mut() {
                 match block {
                     FlowVertex::LinearBlock(graph) => graph.optimize(flow_optim.data_flags),
-                    FlowVertex::Call(_, _) => {}
+                    FlowVertex::Call(_) => {}
+                    FlowVertex::STI(_) => {}
                 }
             }
 
@@ -1296,9 +1324,20 @@ impl FlowGraph {
                             labeled = Some(label);
                         }
                         FlowInst::Call(name, args) => {
-                            let call_node = graph.add_node(FlowVertex::Call(name, args));
+                            let call_node = graph.add_node(FlowVertex::Call(CallVertex {
+                                label: ctx.fresh_label(),
+                                name,
+                                args,
+                            }));
                             graph.add_edge(node, call_node, JumpCondition::Unconditional);
                             edge_from_prev = Some((call_node, JumpCondition::Unconditional));
+                        }
+                        FlowInst::STI => {
+                            let sti_node = graph.add_node(FlowVertex::STI(STIVertex {
+                                label: ctx.fresh_label(),
+                            }));
+                            graph.add_edge(node, sti_node, JumpCondition::Unconditional);
+                            edge_from_prev = Some((sti_node, JumpCondition::Unconditional));
                         }
                         FlowInst::Begin(_) => continue,
                         FlowInst::End => break,
@@ -1390,8 +1429,8 @@ impl FlowGraph {
         let expect_args = replacement.args_count();
 
         while let Some(node) = self.graph.node_references().find_map(|(id, v)| match v {
-            FlowVertex::Call(name, cnt) if name == call => {
-                assert_eq!(*cnt as u16, expect_args);
+            FlowVertex::Call(call_v) if call_v.name == call => {
+                assert_eq!(call_v.args as u16, expect_args);
                 Some(id)
             }
             _ => None,
@@ -1413,7 +1452,8 @@ impl FlowGraph {
                 FlowVertex::LinearBlock(block) => {
                     block.shift_symbolics_for_inline(first_free_loc, args)
                 }
-                FlowVertex::Call(_, _) => {}
+                FlowVertex::Call(_) => {}
+                FlowVertex::STI(_) => {}
             }
         }
     }
@@ -1421,26 +1461,31 @@ impl FlowGraph {
     fn get_label(&self, node: NodeIndex) -> String {
         match &self.graph[node] {
             FlowVertex::LinearBlock(block) => block.start_label.clone(),
-            FlowVertex::Call(name, _) => {
-                // FIXME: dirty hack, because generated asm don't like labels started with '$'
-                format!("{}{}", name.strip_prefix("$").unwrap_or(name), node.index())
-            }
+            FlowVertex::Call(call) => call.label.clone(),
+            FlowVertex::STI(sti) => sti.label.clone(),
         }
     }
 
-    fn compile(&self) -> Vec<Inst> {
+    fn compile(&self, name: &str) -> (Vec<Inst>, u16, u16, u16) {
         let mut code = Vec::new();
+        let mut free_loc = self.loc_count();
 
-        fn compile_vertex(flow: &FlowGraph, node: NodeIndex, code: &mut Vec<Inst>) {
+        fn compile_vertex(
+            flow: &FlowGraph,
+            node: NodeIndex,
+            code: &mut Vec<Inst>,
+            free_loc: &mut u16,
+        ) {
             code.push(Inst::FlowInst(FlowInst::Label(flow.get_label(node))));
 
             match &flow.graph[node] {
                 FlowVertex::LinearBlock(block) => {
-                    code.extend(block.compile().into_iter().map(Inst::LinInst));
+                    code.extend(block.compile(free_loc).into_iter().map(Inst::LinInst));
                 }
-                FlowVertex::Call(name, args) => {
-                    code.push(Inst::FlowInst(FlowInst::Call(name.clone(), *args)));
+                FlowVertex::Call(call) => {
+                    code.push(Inst::FlowInst(FlowInst::Call(call.name.clone(), call.args)));
                 }
+                FlowVertex::STI(_) => code.push(Inst::FlowInst(FlowInst::STI)),
             }
 
             // FIXME: dirty hack -- now that there is only one unconditional jump or
@@ -1567,15 +1612,22 @@ impl Unit {
     fn compile(&self) -> Vec<Inst> {
         let mut code = self.declarations.iter().cloned().map(Decl).collect_vec();
 
-        for (name, function) in self.functions.iter() {
+        for (name, function) in self
+            .functions
+            .iter()
+            // FIXME: "main" function should go first in code generation
+            // actually should find it in `self.declarations`
+            .sorted_by_key(|(name, _)| !name.contains("init"))
+        {
+            let (body, args, locs, clos) = function.compile(&name);
             code.push(Inst::FlowInst(FlowInst::Label(name.clone())));
             code.push(Inst::FlowInst(FlowInst::Begin(Begin {
                 name: name.clone(),
-                args: function.args_count() as u32,
-                locs: function.loc_count() as u32,
-                clos: 0,
+                args: args as u32,
+                locs: locs as u32,
+                clos: clos as u32,
             })));
-            code.extend(function.compile());
+            code.extend(body);
             code.push(Inst::FlowInst(FlowInst::End));
         }
 
@@ -1680,6 +1732,17 @@ fn call_subgraph<W: Write>(w: &mut W, label: &str, name: &str, args: usize) -> f
     Ok(())
 }
 
+fn sti_subgraph<W: Write>(w: &mut W, label: &str) -> fmt::Result {
+    writeln!(w, "subgraph cluster_{label} {{")?;
+    writeln!(w, "label = \"STI\";")?;
+    writeln!(w, "style = filled;")?;
+    writeln!(w, "color = lightgrey;")?;
+    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
+    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
+    writeln!(w, "}}")?;
+    Ok(())
+}
+
 fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
     writeln!(w, "digraph G {{")?;
     writeln!(w, "compound = true;")?;
@@ -1689,7 +1752,8 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
         let label = block.index().to_string();
         match &flow.graph[block] {
             FlowVertex::LinearBlock(graph) => subgraph(w, &label, graph)?,
-            FlowVertex::Call(name, args) => call_subgraph(w, &label, name, *args)?,
+            FlowVertex::Call(call) => call_subgraph(w, &label, &call.name, call.args)?,
+            FlowVertex::STI(_) => sti_subgraph(w, &label)?,
         }
     }
 
