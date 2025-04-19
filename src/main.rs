@@ -1802,7 +1802,7 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     elim_dead_code: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     elim_stores: bool,
 
     /// Propagate constant
