@@ -115,6 +115,7 @@ enum LinInst {
     BinOp(Op),
     Tag(Ident, usize),
     SExp(Ident, usize),
+    Closure(Ident, usize),
     LDA(Sym),
     Dup,
     Drop,
@@ -135,6 +136,7 @@ impl Display for LinInst {
             LinInst::LDA(sym) => write!(f, "LDA {sym}"),
             LinInst::String(v) => write!(f, "STRING {v}"),
             LinInst::Array(n) => write!(f, "ARRAY {n}"),
+            LinInst::Closure(name, captures) => write!(f, "CLOSURE {name}, {captures}"),
         }
     }
 }
@@ -159,6 +161,7 @@ enum FlowInst {
     // at the end of the linear block
     STI,
     STA,
+    CallC(usize),
     Begin(Begin),
     End,
 }
@@ -182,6 +185,7 @@ impl Display for FlowInst {
             },
             FlowInst::Label(label) => write!(f, "LABEL {label}, 1"),
             FlowInst::Call(name, args) => write!(f, "CALL {name}, {args}"),
+            FlowInst::CallC(args) => write!(f, "CALLC {args}"),
             FlowInst::STI => write!(f, "STI"),
             FlowInst::STA => write!(f, "STA"),
             FlowInst::Begin(begin) => write!(
@@ -380,6 +384,15 @@ impl Inst {
                 let num = tokens.next()?.parse().ok()?;
                 Some(FlowInst(FlowInst::Call(name, num)))
             }
+            "CLOSURE" => {
+                let name = tokens.next()?.to_string();
+                let captures = tokens.next()?.parse().ok()?;
+                Some(LinInst(LinInst::Closure(name, captures)))
+            }
+            "CALLC" => {
+                let args = tokens.next()?.parse().ok()?;
+                Some(FlowInst(FlowInst::CallC(args)))
+            }
             "PUBLIC" => match tokens.next()? {
                 "Val" => {
                     let unit = tokens.next()?.to_string();
@@ -564,16 +577,30 @@ struct STAVertex {
 }
 
 #[derive(Debug, Clone)]
+struct CallCVertex {
+    label: String,
+    args: usize,
+}
+
+#[derive(Debug, Clone)]
 enum FlowVertex {
     LinearBlock(DataGraph),
     Call(CallVertex),
     STI(STIVertex),
     STA(STAVertex),
+    CallC(CallCVertex),
 }
 
 impl FlowVertex {
     fn is_block(&self) -> bool {
         matches!(self, Self::LinearBlock(_))
+    }
+
+    fn block(&self) -> Option<&DataGraph> {
+        match self {
+            FlowVertex::LinearBlock(graph) => Some(graph),
+            _ => None,
+        }
     }
 }
 
@@ -645,6 +672,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
             LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
             LinInst::SExp(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
+            LinInst::Closure(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::Array(n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::Dup => {
                 match stack.peek() {
@@ -1165,12 +1193,7 @@ impl FlowGraph {
     fn args_count(&self) -> u16 {
         self.graph
             .node_weights()
-            .filter_map(|v| match v {
-                FlowVertex::LinearBlock(block) => Some(block.args_count()),
-                FlowVertex::Call(_) => None,
-                FlowVertex::STI(_) => None,
-                FlowVertex::STA(_) => None,
-            })
+            .filter_map(|v| v.block().map(DataGraph::args_count))
             .max()
             .unwrap_or(0)
     }
@@ -1178,12 +1201,7 @@ impl FlowGraph {
     fn loc_count(&self) -> u16 {
         self.graph
             .node_weights()
-            .filter_map(|v| match v {
-                FlowVertex::LinearBlock(block) => Some(block.locs_count()),
-                FlowVertex::Call(_) => None,
-                FlowVertex::STI(_) => None,
-                FlowVertex::STA(_) => None,
-            })
+            .filter_map(|v| v.block().map(DataGraph::locs_count))
             .max()
             .unwrap_or(0)
     }
@@ -1203,12 +1221,7 @@ impl FlowGraph {
         while let Some((node, v)) = self
             .graph
             .node_references()
-            .filter_map(|(id, block)| match block {
-                FlowVertex::LinearBlock(block) => Some((id, block)),
-                FlowVertex::Call(_) => None,
-                FlowVertex::STI(_) => None,
-                FlowVertex::STA(_) => None,
-            })
+            .filter_map(|(id, v)| v.block().map(|block| (id, block)))
             .filter(|(id, _)| {
                 self.graph
                     .edges_directed(*id, Direction::Outgoing)
@@ -1222,11 +1235,8 @@ impl FlowGraph {
                 })
             })
         {
-            match &mut self.graph[node] {
-                FlowVertex::LinearBlock(block) => block.remove_jump_decision(),
-                FlowVertex::Call(_) => {}
-                FlowVertex::STI(_) => {}
-                FlowVertex::STA(_) => {}
+            if let FlowVertex::LinearBlock(block) = &mut self.graph[node] {
+                block.remove_jump_decision();
             }
 
             let outgoings = self
@@ -1263,18 +1273,14 @@ impl FlowGraph {
                     })
             })
         {
-            let ext = match &self.graph[to] {
-                FlowVertex::LinearBlock(block) => block.clone(),
-                FlowVertex::Call(_) => unreachable!("by filter"),
-                FlowVertex::STI(_) => unreachable!("by filter"),
-                FlowVertex::STA(_) => unreachable!("by filter"),
+            let ext = if let FlowVertex::LinearBlock(block) = &self.graph[to] {
+                block.clone()
+            } else {
+                unreachable!("by filter")
             };
 
-            match &mut self.graph[from] {
-                FlowVertex::LinearBlock(block) => block.extend(&ext),
-                FlowVertex::Call(_) => unreachable!("by filter"),
-                FlowVertex::STI(_) => unreachable!("by filter"),
-                FlowVertex::STA(_) => unreachable!("by filter"),
+            if let FlowVertex::LinearBlock(block) = &mut self.graph[from] {
+                block.extend(&ext);
             }
 
             let outgoings = self
@@ -1300,11 +1306,8 @@ impl FlowGraph {
     fn optimize(&mut self, flow_optim: FlowOptimFlags) {
         for _ in 0..flow_optim.passes {
             for block in self.graph.node_weights_mut() {
-                match block {
-                    FlowVertex::LinearBlock(graph) => graph.optimize(flow_optim.data_flags),
-                    FlowVertex::Call(_) => {}
-                    FlowVertex::STI(_) => {}
-                    FlowVertex::STA(_) => {}
+                if let FlowVertex::LinearBlock(graph) = block {
+                    graph.optimize(flow_optim.data_flags);
                 }
             }
 
@@ -1368,6 +1371,14 @@ impl FlowGraph {
                             let call_node = graph.add_node(FlowVertex::Call(CallVertex {
                                 label: ctx.fresh_label(),
                                 name,
+                                args,
+                            }));
+                            graph.add_edge(node, call_node, JumpCondition::Unconditional);
+                            edge_from_prev = Some((call_node, JumpCondition::Unconditional));
+                        }
+                        FlowInst::CallC(args) => {
+                            let call_node = graph.add_node(FlowVertex::CallC(CallCVertex {
+                                label: ctx.fresh_label(),
                                 args,
                             }));
                             graph.add_edge(node, call_node, JumpCondition::Unconditional);
@@ -1496,13 +1507,8 @@ impl FlowGraph {
         let args = self.args_count();
 
         for node in self.graph.node_weights_mut() {
-            match node {
-                FlowVertex::LinearBlock(block) => {
-                    block.shift_symbolics_for_inline(first_free_loc, args)
-                }
-                FlowVertex::Call(_) => {}
-                FlowVertex::STI(_) => {}
-                FlowVertex::STA(_) => {}
+            if let FlowVertex::LinearBlock(block) = node {
+                block.shift_symbolics_for_inline(first_free_loc, args);
             }
         }
     }
@@ -1513,6 +1519,7 @@ impl FlowGraph {
             FlowVertex::Call(call) => call.label.clone(),
             FlowVertex::STI(sti) => sti.label.clone(),
             FlowVertex::STA(sta) => sta.label.clone(),
+            FlowVertex::CallC(callc) => callc.label.clone(),
         }
     }
 
@@ -1537,6 +1544,7 @@ impl FlowGraph {
                 }
                 FlowVertex::STI(_) => code.push(Inst::FlowInst(FlowInst::STI)),
                 FlowVertex::STA(_) => code.push(Inst::FlowInst(FlowInst::STA)),
+                FlowVertex::CallC(callc) => code.push(Inst::FlowInst(FlowInst::CallC(callc.args))),
             }
 
             // FIXME: dirty hack -- now that there is only one unconditional jump or
@@ -1786,6 +1794,17 @@ fn call_subgraph<W: Write>(w: &mut W, label: &str, name: &str, args: usize) -> f
     Ok(())
 }
 
+fn callc_subgraph<W: Write>(w: &mut W, label: &str, args: usize) -> fmt::Result {
+    writeln!(w, "subgraph cluster_{label} {{")?;
+    writeln!(w, "label = \"callc {}\";", args)?;
+    writeln!(w, "style = filled;")?;
+    writeln!(w, "color = lightgrey;")?;
+    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
+    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
+    writeln!(w, "}}")?;
+    Ok(())
+}
+
 fn sti_subgraph<W: Write>(w: &mut W, label: &str) -> fmt::Result {
     writeln!(w, "subgraph cluster_{label} {{")?;
     writeln!(w, "label = \"STI\";")?;
@@ -1820,6 +1839,7 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
             FlowVertex::Call(call) => call_subgraph(w, &label, &call.name, call.args)?,
             FlowVertex::STI(_) => sti_subgraph(w, &label)?,
             FlowVertex::STA(_) => sta_subgraph(w, &label)?,
+            FlowVertex::CallC(callc) => callc_subgraph(w, &label, callc.args)?,
         }
     }
 
