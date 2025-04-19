@@ -1094,7 +1094,13 @@ impl DataGraph {
             code.push(LinInst::Drop);
         }
 
-        for &node in output_nodes.iter() {
+        for node in self
+            .outputs
+            .stack
+            .iter()
+            .cloned()
+            .chain(self.jump_decided_by)
+        {
             compile_node(
                 node,
                 &self.dag,
