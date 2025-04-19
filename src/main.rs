@@ -1095,6 +1095,8 @@ impl DataGraph {
             }
         }
 
+        eprintln!("start compile linear block: {}", self.start_label);
+
         let output_nodes: BTreeSet<_> = self
             .outputs
             .stack
@@ -1102,6 +1104,16 @@ impl DataGraph {
             .cloned()
             .chain(self.jump_decided_by)
             .collect();
+
+        eprintln!(
+            "output nodes: {:?}",
+            self.outputs
+                .stack
+                .iter()
+                .cloned()
+                .chain(self.jump_decided_by)
+                .collect_vec()
+        );
 
         let mut code = Vec::new();
         let mut already_compiled = BTreeMap::new();
@@ -1133,6 +1145,8 @@ impl DataGraph {
             .filter(|&v| self.dag.edges_directed(v, Direction::Outgoing).count() == 0);
 
         for node in dead_nodes {
+            eprintln!("compile dead node: {:?}", self.dag[node]);
+
             compile_node(
                 node,
                 &self.dag,
@@ -1153,6 +1167,8 @@ impl DataGraph {
             .cloned()
             .chain(self.jump_decided_by)
         {
+            eprintln!("compile stack output node: {:?}", self.dag[node]);
+
             compile_node(
                 node,
                 &self.dag,
@@ -1569,6 +1585,8 @@ impl FlowGraph {
             }
         }
 
+        eprintln!("start compile function: {name}");
+
         compile_vertex(self, self.input, &mut code, &mut free_loc);
 
         for vertex in self
@@ -1583,7 +1601,8 @@ impl FlowGraph {
         // FIXME: change to get fresh label?
         let exit_label = format!("{name}_exit");
 
-        for &output in self.outputs.iter() {
+        // FIXME: rethink case when output block is input block at the same time
+        for &output in self.outputs.iter().filter(|&&output| output != self.input) {
             compile_vertex(self, output, &mut code, &mut free_loc);
             code.push(Inst::FlowInst(FlowInst::Jmp(
                 JumpMode::Unconditional,
