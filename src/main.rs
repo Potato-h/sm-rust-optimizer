@@ -262,8 +262,8 @@ struct FlowOptimFlags {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Inst {
-    LinInst(LinInst),
-    FlowInst(FlowInst),
+    Linear(LinInst),
+    Flow(FlowInst),
     Decl(Decl),
 }
 
@@ -297,65 +297,65 @@ impl Inst {
                 let args = tokens.next()?.parse().ok()?;
                 let locs = tokens.next()?.parse().ok()?;
                 let clos = tokens.next()?.parse().ok()?;
-                Some(FlowInst(FlowInst::Begin(Begin {
+                Some(Flow(FlowInst::Begin(Begin {
                     name,
                     args,
                     locs,
                     clos,
                 })))
             }
-            "END" => Some(FlowInst(FlowInst::End)),
+            "END" => Some(Flow(FlowInst::End)),
             "LD" => {
                 let sym = Inst::parse_sym(&mut tokens)?;
-                Some(LinInst(LinInst::Load(sym)))
+                Some(Linear(LinInst::Load(sym)))
             }
             "ST" => {
                 let sym = Inst::parse_sym(&mut tokens)?;
-                Some(LinInst(LinInst::Store(sym)))
+                Some(Linear(LinInst::Store(sym)))
             }
             "LDA" => {
                 let sym = Inst::parse_sym(&mut tokens)?;
-                Some(LinInst(LinInst::LDA(sym)))
+                Some(Linear(LinInst::LDA(sym)))
             }
-            "STI" => Some(FlowInst(FlowInst::STI)),
-            "STA" => Some(FlowInst(FlowInst::STA)),
-            "DUP" => Some(LinInst(LinInst::Dup)),
-            "DROP" => Some(LinInst(LinInst::Drop)),
+            "STI" => Some(Flow(FlowInst::STI)),
+            "STA" => Some(Flow(FlowInst::STA)),
+            "DUP" => Some(Linear(LinInst::Dup)),
+            "DROP" => Some(Linear(LinInst::Drop)),
             "LABEL" => {
                 let label = tokens.next()?.to_string();
-                Some(FlowInst(FlowInst::Label(label)))
+                Some(Flow(FlowInst::Label(label)))
             }
             "CONST" => {
                 let value = tokens.next()?.parse().ok()?;
-                Some(LinInst(LinInst::Const(value)))
+                Some(Linear(LinInst::Const(value)))
             }
             "STRING" => {
                 // FIXME: parse like normal human being
                 let value = code.strip_prefix("STRING ")?.to_string();
-                Some(LinInst(LinInst::String(value)))
+                Some(Linear(LinInst::String(value)))
             }
             "ARRAY" => {
                 let n = tokens.next()?.parse().ok()?;
-                Some(LinInst(LinInst::Array(n)))
+                Some(Linear(LinInst::Array(n)))
             }
             "BINOP" => match tokens.next() {
-                Some("+") => Some(LinInst(LinInst::BinOp(Op::Plus))),
-                Some("-") => Some(LinInst(LinInst::BinOp(Op::Minus))),
-                Some("*") => Some(LinInst(LinInst::BinOp(Op::Mul))),
-                Some("/") => Some(LinInst(LinInst::BinOp(Op::Div))),
-                Some("%") => Some(LinInst(LinInst::BinOp(Op::Mod))),
-                Some("==") => Some(LinInst(LinInst::BinOp(Op::Eq))),
-                Some(">") => Some(LinInst(LinInst::BinOp(Op::Gt))),
-                Some(">=") => Some(LinInst(LinInst::BinOp(Op::GtEq))),
-                Some("<") => Some(LinInst(LinInst::BinOp(Op::Lt))),
-                Some("<=") => Some(LinInst(LinInst::BinOp(Op::LtEq))),
-                Some("!=") => Some(LinInst(LinInst::BinOp(Op::NotEq))),
-                Some("&&") => Some(LinInst(LinInst::BinOp(Op::And))),
+                Some("+") => Some(Linear(LinInst::BinOp(Op::Plus))),
+                Some("-") => Some(Linear(LinInst::BinOp(Op::Minus))),
+                Some("*") => Some(Linear(LinInst::BinOp(Op::Mul))),
+                Some("/") => Some(Linear(LinInst::BinOp(Op::Div))),
+                Some("%") => Some(Linear(LinInst::BinOp(Op::Mod))),
+                Some("==") => Some(Linear(LinInst::BinOp(Op::Eq))),
+                Some(">") => Some(Linear(LinInst::BinOp(Op::Gt))),
+                Some(">=") => Some(Linear(LinInst::BinOp(Op::GtEq))),
+                Some("<") => Some(Linear(LinInst::BinOp(Op::Lt))),
+                Some("<=") => Some(Linear(LinInst::BinOp(Op::LtEq))),
+                Some("!=") => Some(Linear(LinInst::BinOp(Op::NotEq))),
+                Some("&&") => Some(Linear(LinInst::BinOp(Op::And))),
                 x => panic!("unknown binary op: {x:?}"),
             },
             "JMP" => {
                 let label = tokens.next()?.to_string();
-                Some(FlowInst(FlowInst::Jmp(JumpMode::Unconditional, label)))
+                Some(Flow(FlowInst::Jmp(JumpMode::Unconditional, label)))
             }
             "CJMP" => {
                 let mode = match tokens.next() {
@@ -365,33 +365,33 @@ impl Inst {
                 };
 
                 let label = tokens.next()?.to_string();
-                Some(FlowInst(FlowInst::Jmp(mode, label)))
+                Some(Flow(FlowInst::Jmp(mode, label)))
             }
-            "ELEM" => Some(LinInst(LinInst::Elem)),
+            "ELEM" => Some(Linear(LinInst::Elem)),
             "PATT" => {
                 let _ = tokens.next();
                 let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
                 let num = tokens.next()?.parse().ok()?;
-                Some(LinInst(LinInst::Tag(tag.to_string(), num)))
+                Some(Linear(LinInst::Tag(tag.to_string(), num)))
             }
             "SEXP" => {
                 let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
                 let num = tokens.next()?.parse().ok()?;
-                Some(LinInst(LinInst::SExp(tag.to_string(), num)))
+                Some(Linear(LinInst::SExp(tag.to_string(), num)))
             }
             "CALL" => {
                 let name = tokens.next()?.to_string();
                 let num = tokens.next()?.parse().ok()?;
-                Some(FlowInst(FlowInst::Call(name, num)))
+                Some(Flow(FlowInst::Call(name, num)))
             }
             "CLOSURE" => {
                 let name = tokens.next()?.to_string();
                 let captures = tokens.next()?.parse().ok()?;
-                Some(LinInst(LinInst::Closure(name, captures)))
+                Some(Linear(LinInst::Closure(name, captures)))
             }
             "CALLC" => {
                 let args = tokens.next()?.parse().ok()?;
-                Some(FlowInst(FlowInst::CallC(args)))
+                Some(Flow(FlowInst::CallC(args)))
             }
             "PUBLIC" => match tokens.next()? {
                 "Val" => {
@@ -424,8 +424,8 @@ impl Inst {
 impl Display for Inst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Inst::LinInst(inst) => inst.fmt(f),
-            Inst::FlowInst(inst) => inst.fmt(f),
+            Inst::Linear(inst) => inst.fmt(f),
+            Inst::Flow(inst) => inst.fmt(f),
             Inst::Decl(decl) => decl.fmt(f),
         }
     }
@@ -661,12 +661,12 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
                 symbolics.insert(sym.clone(), node);
             }
             LinInst::Load(ref sym) => {
-                if !symbolics.contains_key(&sym) {
+                if !symbolics.contains_key(sym) {
                     let node = dag.add_node(DataVertex::Symbolic(sym.clone()));
                     symbolics.insert(sym.clone(), node);
                 }
 
-                stack.push(symbolics[&sym]);
+                stack.push(symbolics[sym]);
             }
             LinInst::LDA(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
@@ -1022,11 +1022,8 @@ impl DataGraph {
 
     fn shift_symbolics_for_inline(&mut self, first_free_loc: u16, args_count: u16) {
         for node in self.dag.node_weights_mut() {
-            match node {
-                DataVertex::Symbolic(sym) => {
-                    *sym = sym_shift(sym.clone(), first_free_loc, args_count)
-                }
-                _ => {}
+            if let DataVertex::Symbolic(sym) = node {
+                *sym = sym_shift(sym.clone(), first_free_loc, args_count);
             }
         }
 
@@ -1358,12 +1355,12 @@ impl FlowGraph {
         let mut from_label_to_block: BTreeMap<Label, NodeIndex> = BTreeMap::new();
 
         // skip(1) for Begin operation
-        for (i, inst) in code.into_iter().enumerate().skip(1) {
+        for inst in code.into_iter().skip(1) {
             match inst {
-                Inst::LinInst(inst) => {
+                Inst::Linear(inst) => {
                     block.push(inst);
                 }
-                Inst::FlowInst(inst) => {
+                Inst::Flow(inst) => {
                     let start_label = labeled.take().unwrap_or(ctx.fresh_label());
                     let has_cjmp = inst.conditional_jmp();
                     let this_block =
@@ -1587,19 +1584,19 @@ impl FlowGraph {
             provide_label: bool,
         ) {
             if provide_label {
-                code.push(Inst::FlowInst(FlowInst::Label(flow.get_label(node))));
+                code.push(Inst::Flow(FlowInst::Label(flow.get_label(node))));
             }
 
             match &flow.graph[node] {
                 FlowVertex::LinearBlock(block) => {
-                    code.extend(block.compile(free_loc).into_iter().map(Inst::LinInst));
+                    code.extend(block.compile(free_loc).into_iter().map(Inst::Linear));
                 }
                 FlowVertex::Call(call) => {
-                    code.push(Inst::FlowInst(FlowInst::Call(call.name.clone(), call.args)));
+                    code.push(Inst::Flow(FlowInst::Call(call.name.clone(), call.args)));
                 }
-                FlowVertex::STI(_) => code.push(Inst::FlowInst(FlowInst::STI)),
-                FlowVertex::STA(_) => code.push(Inst::FlowInst(FlowInst::STA)),
-                FlowVertex::CallC(callc) => code.push(Inst::FlowInst(FlowInst::CallC(callc.args))),
+                FlowVertex::STI(_) => code.push(Inst::Flow(FlowInst::STI)),
+                FlowVertex::STA(_) => code.push(Inst::Flow(FlowInst::STA)),
+                FlowVertex::CallC(callc) => code.push(Inst::Flow(FlowInst::CallC(callc.args))),
             }
         }
 
@@ -1610,7 +1607,6 @@ impl FlowGraph {
             current: NodeIndex,
             previous: Option<NodeIndex>,
             code: &mut Vec<Inst>,
-            outputs: &BTreeSet<NodeIndex>,
             exit_label: &str,
             already_compiled: &mut BTreeSet<NodeIndex>,
             free_loc: &mut u16,
@@ -1628,7 +1624,7 @@ impl FlowGraph {
 
             if let Some(outs) = flow.jmp_outgoings(current) {
                 if let Some((mode, to)) = outs.cjmp {
-                    code.push(Inst::FlowInst(FlowInst::Jmp(mode, flow.get_label(to))));
+                    code.push(Inst::Flow(FlowInst::Jmp(mode, flow.get_label(to))));
                 }
 
                 if !already_compiled.contains(&outs.jmp) {
@@ -1637,21 +1633,20 @@ impl FlowGraph {
                         outs.jmp,
                         Some(current),
                         code,
-                        outputs,
                         exit_label,
                         already_compiled,
                         free_loc,
                     );
                 } else {
-                    code.push(Inst::FlowInst(FlowInst::Jmp(
+                    code.push(Inst::Flow(FlowInst::Jmp(
                         JumpMode::Unconditional,
                         flow.get_label(outs.jmp),
                     )));
                 }
             }
 
-            if outputs.contains(&current) {
-                code.push(Inst::FlowInst(FlowInst::Jmp(
+            if flow.outputs.contains(&current) {
+                code.push(Inst::Flow(FlowInst::Jmp(
                     JumpMode::Unconditional,
                     exit_label.to_string(),
                 )));
@@ -1670,7 +1665,6 @@ impl FlowGraph {
                     node,
                     None,
                     &mut code,
-                    &self.outputs.iter().cloned().collect(),
                     &exit_label,
                     &mut already_compiled,
                     &mut free_loc,
@@ -1678,7 +1672,7 @@ impl FlowGraph {
             }
         }
 
-        code.push(Inst::FlowInst(FlowInst::Label(exit_label)));
+        code.push(Inst::Flow(FlowInst::Label(exit_label)));
         (code, self.args_count(), free_loc, 0)
     }
 }
@@ -1727,11 +1721,11 @@ impl Unit {
             })
             .peekable();
 
-        while let Some(FlowInst(FlowInst::Label(name))) = code.peek() {
+        while let Some(Flow(FlowInst::Label(name))) = code.peek() {
             let name = name.clone();
             let code: Vec<_> = (&mut code)
                 .skip(1)
-                .take_while_inclusive(|inst| inst != &FlowInst(FlowInst::End))
+                .take_while_inclusive(|inst| inst != &Flow(FlowInst::End))
                 .collect();
 
             functions.insert(name, FlowGraph::analyze_function(ctx, code));
@@ -1752,7 +1746,7 @@ impl Unit {
             let call_graph = self.functions[call].clone();
 
             self.functions.values_mut().for_each(|flow| {
-                flow.replace_all_calls(&call, &call_graph, 1);
+                flow.replace_all_calls(call, &call_graph, 1);
                 flow.optimize(flags.flow_optim);
             });
         }
@@ -1768,16 +1762,16 @@ impl Unit {
             // actually should find it in `self.declarations`
             .sorted_by_key(|(name, _)| !name.contains("init"))
         {
-            let (body, args, locs, clos) = function.compile(&name);
-            code.push(Inst::FlowInst(FlowInst::Label(name.clone())));
-            code.push(Inst::FlowInst(FlowInst::Begin(Begin {
+            let (body, args, locs, clos) = function.compile(name);
+            code.push(Inst::Flow(FlowInst::Label(name.clone())));
+            code.push(Inst::Flow(FlowInst::Begin(Begin {
                 name: name.clone(),
                 args: args as u32,
                 locs: locs as u32,
                 clos: clos as u32,
             })));
             code.extend(body);
-            code.push(Inst::FlowInst(FlowInst::End));
+            code.push(Inst::Flow(FlowInst::End));
         }
 
         code
@@ -1950,7 +1944,7 @@ fn parse_stack_code(code: &str) -> Vec<Inst> {
     code.lines()
         .filter(|line| !line.chars().all(char::is_whitespace))
         .filter(|line| !line.contains("META")) // FIXME: process failed pattern matching
-        .map(|line| Inst::parse(line).expect(&format!("Failed to parse: {line}")))
+        .map(|line| Inst::parse(line).unwrap_or_else(|| panic!("Failed to parse: {line}")))
         .collect()
 }
 
@@ -2042,11 +2036,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
 fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
     UnitOptimFlags {
         flow_optim: flow_flags_from_args(args),
-        force_inline: args
-            .force_inline
-            .as_ref()
-            .map(|x| x.clone())
-            .unwrap_or_default(),
+        force_inline: args.force_inline.clone().unwrap_or_default(),
     }
 }
 
