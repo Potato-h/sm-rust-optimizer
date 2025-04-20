@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Write};
 use std::fs::{self, File};
 use std::io::read_to_string;
-use std::mem;
 use std::path::PathBuf;
+use std::{iter, mem};
 
 use clap::Parser;
 use either::Either::{self, Left, Right};
@@ -1205,6 +1205,12 @@ fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
 
 type Label = String;
 
+#[derive(Debug, Clone)]
+struct JmpEdges {
+    jmp: NodeIndex,
+    cjmp: Option<(JumpMode, NodeIndex)>,
+}
+
 impl FlowGraph {
     fn args_count(&self) -> u16 {
         self.graph
@@ -1539,17 +1545,50 @@ impl FlowGraph {
         }
     }
 
-    fn compile(&self, name: &str) -> (Vec<Inst>, u16, u16, u16) {
-        let mut code = Vec::new();
-        let mut free_loc = self.loc_count();
+    /// Since flow graph forget actual jumps information from stack machine code,
+    /// it's useful to provide helper that will reify it back
+    fn jmp_outgoings(&self, node: NodeIndex) -> Option<JmpEdges> {
+        let mut jmp = None;
+        let mut cjmp = None;
 
+        // FIXME: dirty hack -- now that there is only one unconditional jump or
+        // 2 jumps with different conditions. This loop occurs because of poor
+        // choice of graph representation.
+        for (i, edge) in self
+            .graph
+            .edges_directed(node, Direction::Outgoing)
+            .enumerate()
+        {
+            match edge.weight() {
+                _ if i > 0 => {
+                    jmp = Some(edge.target());
+                }
+                JumpCondition::Unconditional => {
+                    jmp = Some(edge.target());
+                }
+                JumpCondition::Zero => {
+                    cjmp = Some((JumpMode::Zero, edge.target()));
+                }
+                JumpCondition::NonZero => {
+                    cjmp = Some((JumpMode::NonZero, edge.target()));
+                }
+            };
+        }
+
+        Some(JmpEdges { jmp: jmp?, cjmp })
+    }
+
+    fn compile(&self, name: &str) -> (Vec<Inst>, u16, u16, u16) {
         fn compile_vertex(
             flow: &FlowGraph,
             node: NodeIndex,
             code: &mut Vec<Inst>,
             free_loc: &mut u16,
+            provide_label: bool,
         ) {
-            code.push(Inst::FlowInst(FlowInst::Label(flow.get_label(node))));
+            if provide_label {
+                code.push(Inst::FlowInst(FlowInst::Label(flow.get_label(node))));
+            }
 
             match &flow.graph[node] {
                 FlowVertex::LinearBlock(block) => {
@@ -1562,52 +1601,81 @@ impl FlowGraph {
                 FlowVertex::STA(_) => code.push(Inst::FlowInst(FlowInst::STA)),
                 FlowVertex::CallC(callc) => code.push(Inst::FlowInst(FlowInst::CallC(callc.args))),
             }
-
-            // FIXME: dirty hack -- now that there is only one unconditional jump or
-            // 2 jumps with different conditions. This loop occurs because of poor
-            // choice of graph representation.
-            for (i, jmp) in flow
-                .graph
-                .edges_directed(node, Direction::Outgoing)
-                .enumerate()
-            {
-                let mode = match jmp.weight() {
-                    _ if i > 0 => JumpMode::Unconditional,
-                    JumpCondition::Unconditional => JumpMode::Unconditional,
-                    JumpCondition::Zero => JumpMode::Zero,
-                    JumpCondition::NonZero => JumpMode::NonZero,
-                };
-
-                code.push(Inst::FlowInst(FlowInst::Jmp(
-                    mode,
-                    flow.get_label(jmp.target()),
-                )));
-            }
         }
 
         eprintln!("start compile function: {name}");
 
-        compile_vertex(self, self.input, &mut code, &mut free_loc);
+        fn dfs(
+            flow: &FlowGraph,
+            current: NodeIndex,
+            previous: Option<NodeIndex>,
+            code: &mut Vec<Inst>,
+            outputs: &BTreeSet<NodeIndex>,
+            exit_label: &str,
+            already_compiled: &mut BTreeSet<NodeIndex>,
+            free_loc: &mut u16,
+        ) {
+            already_compiled.insert(current);
 
-        for vertex in self
-            .graph
-            .node_indices()
-            .filter(|v| *v != self.input)
-            .filter(|v| !self.outputs.contains(v))
-        {
-            compile_vertex(self, vertex, &mut code, &mut free_loc);
+            let provide_label = flow
+                .graph
+                .edges_directed(current, Direction::Incoming)
+                .filter(|v| !previous.iter().contains(&v.source())) // all except previously compiled node
+                .count()
+                > 0;
+
+            compile_vertex(flow, current, code, free_loc, provide_label);
+
+            if let Some(outs) = flow.jmp_outgoings(current) {
+                if let Some((mode, to)) = outs.cjmp {
+                    code.push(Inst::FlowInst(FlowInst::Jmp(mode, flow.get_label(to))));
+                }
+
+                if !already_compiled.contains(&outs.jmp) {
+                    dfs(
+                        flow,
+                        outs.jmp,
+                        Some(current),
+                        code,
+                        outputs,
+                        exit_label,
+                        already_compiled,
+                        free_loc,
+                    );
+                } else {
+                    code.push(Inst::FlowInst(FlowInst::Jmp(
+                        JumpMode::Unconditional,
+                        flow.get_label(outs.jmp),
+                    )));
+                }
+            }
+
+            if outputs.contains(&current) {
+                code.push(Inst::FlowInst(FlowInst::Jmp(
+                    JumpMode::Unconditional,
+                    exit_label.to_string(),
+                )));
+            }
         }
 
-        // FIXME: change to get fresh label?
         let exit_label = format!("{name}_exit");
+        let mut code = Vec::new();
+        let mut free_loc = self.loc_count();
+        let mut already_compiled = BTreeSet::new();
 
-        // FIXME: rethink case when output block is input block at the same time
-        for &output in self.outputs.iter().filter(|&&output| output != self.input) {
-            compile_vertex(self, output, &mut code, &mut free_loc);
-            code.push(Inst::FlowInst(FlowInst::Jmp(
-                JumpMode::Unconditional,
-                exit_label.clone(),
-            )));
+        for node in iter::once(self.input).chain(self.graph.node_indices()) {
+            if !already_compiled.contains(&node) {
+                dfs(
+                    self,
+                    node,
+                    None,
+                    &mut code,
+                    &self.outputs.iter().cloned().collect(),
+                    &exit_label,
+                    &mut already_compiled,
+                    &mut free_loc,
+                );
+            }
         }
 
         code.push(Inst::FlowInst(FlowInst::Label(exit_label)));
