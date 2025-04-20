@@ -1034,7 +1034,7 @@ impl DataGraph {
     }
 
     // FIXME: need to somehow recognize and drop unused stack variables.
-    fn compile(&self, free_loc: &mut u16) -> Vec<LinInst> {
+    fn compile(&self, mut free_loc: u16) -> Vec<LinInst> {
         fn compile_node(
             node: NodeIndex,
             dag: &StableGraph<DataVertex, ArgStackOffset>,
@@ -1127,10 +1127,10 @@ impl DataGraph {
             })
             .sorted_by_key(|(_, offset)| *offset)
         {
-            code.push(LinInst::Store(Sym::Loc(*free_loc)));
+            code.push(LinInst::Store(Sym::Loc(free_loc)));
             code.push(LinInst::Drop);
-            already_compiled.insert(input, *free_loc);
-            *free_loc += 1;
+            already_compiled.insert(input, free_loc);
+            free_loc += 1;
         }
 
         // FIXME: need to compile dead nodes early to drop unused stack variables, but
@@ -1149,7 +1149,7 @@ impl DataGraph {
                 &self.dag,
                 &self.symbolics,
                 &mut already_compiled,
-                free_loc,
+                &mut free_loc,
                 &mut code,
             );
 
@@ -1171,7 +1171,7 @@ impl DataGraph {
                 &self.dag,
                 &self.symbolics,
                 &mut already_compiled,
-                free_loc,
+                &mut free_loc,
                 &mut code,
             );
         }
@@ -1580,7 +1580,7 @@ impl FlowGraph {
             flow: &FlowGraph,
             node: NodeIndex,
             code: &mut Vec<Inst>,
-            free_loc: &mut u16,
+            free_loc: u16,
             provide_label: bool,
         ) {
             if provide_label {
@@ -1609,7 +1609,7 @@ impl FlowGraph {
             code: &mut Vec<Inst>,
             exit_label: &str,
             already_compiled: &mut BTreeSet<NodeIndex>,
-            free_loc: &mut u16,
+            free_loc: u16,
         ) {
             already_compiled.insert(current);
 
@@ -1655,7 +1655,7 @@ impl FlowGraph {
 
         let exit_label = format!("{name}_exit");
         let mut code = Vec::new();
-        let mut free_loc = self.loc_count();
+        let free_loc = self.loc_count();
         let mut already_compiled = BTreeSet::new();
 
         for node in iter::once(self.input).chain(self.graph.node_indices()) {
@@ -1667,13 +1667,24 @@ impl FlowGraph {
                     &mut code,
                     &exit_label,
                     &mut already_compiled,
-                    &mut free_loc,
+                    free_loc,
                 );
             }
         }
 
+        let actual_locs = code
+            .iter()
+            .filter_map(|inst| match inst {
+                Linear(LinInst::Store(Sym::Loc(l))) => Some(*l + 1),
+                Linear(LinInst::Load(Sym::Loc(l))) => Some(*l + 1),
+                Linear(LinInst::LDA(Sym::Loc(l))) => Some(*l + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+
         code.push(Inst::Flow(FlowInst::Label(exit_label)));
-        (code, self.args_count(), free_loc, 0)
+        (code, self.args_count(), actual_locs, 0)
     }
 }
 
