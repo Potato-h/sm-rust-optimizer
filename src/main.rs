@@ -433,6 +433,8 @@ impl Display for Inst {
 
 type ArgStackOffset = usize;
 
+// FIXME: in general case outputs and jump_decided_by may overlap
+// it can break merging of blocks
 #[derive(Debug, Clone)]
 struct DataGraph {
     start_label: String,
@@ -757,6 +759,8 @@ where
 
 impl DataGraph {
     fn extend(&mut self, ext: &DataGraph) {
+        assert!(self.jump_decided_by.is_none());
+
         let ext_to_source = add_graph(&mut self.dag, &ext.dag);
 
         let ext_stack_vars_in_source = ext.inputs.iter().filter_map(|&node| match ext.dag[node] {
@@ -787,19 +791,22 @@ impl DataGraph {
             self.dag.remove_node(input);
         }
 
+        // update ext_to_source after removing some input nodes in ext
+        let ext_to_source = |node: NodeIndex| {
+            *ext_deleted_inputs
+                .get(&ext_to_source[&node])
+                .unwrap_or(&ext_to_source[&node])
+        };
+
         // Merge results of 2 stacks. Now self contains actual count of
         // virtual nodes, but ext contains actual output nodes that will be on stack
         // after block execution
         self.outputs
             .stack
-            .extend(ext.outputs.stack.iter().map(|node| {
-                *ext_deleted_inputs
-                    .get(&ext_to_source[node])
-                    .unwrap_or(&ext_to_source[node])
-            }));
+            .extend(ext.outputs.stack.iter().map(|&node| ext_to_source(node)));
 
         let ext_sym_vars_in_source = ext.inputs.iter().filter_map(|&node| match &ext.dag[node] {
-            DataVertex::Symbolic(name) => Some((ext_to_source[&node], name)),
+            DataVertex::Symbolic(name) => Some((ext_to_source(node), name)),
             _ => None,
         });
 
@@ -813,12 +820,16 @@ impl DataGraph {
                 // Otherwise keep symbolic input node
                 self.inputs.push(sym);
             }
-
-            self.symbolics
-                .insert(name.clone(), ext_to_source[&ext.symbolics[name]]);
         }
 
-        self.jump_decided_by = ext.jump_decided_by.as_ref().map(|id| ext_to_source[id]);
+        // if symbolic value was never read in block, then there is no corresponding
+        // symbolic input node, so need to update all symbolics
+        for (name, sym_in_ext) in ext.symbolics.iter() {
+            self.symbolics
+                .insert(name.clone(), ext_to_source(*sym_in_ext));
+        }
+
+        self.jump_decided_by = ext.jump_decided_by.as_ref().map(|&id| ext_to_source(id));
         assert!(!algo::is_cyclic_directed(&self.dag));
     }
 
@@ -1292,6 +1303,12 @@ impl FlowGraph {
                     })
             })
         {
+            eprintln!(
+                "merging blocks: {} -> {}",
+                self.get_label(from),
+                self.get_label(to)
+            );
+
             let ext = if let FlowVertex::LinearBlock(block) = &self.graph[to] {
                 block.clone()
             } else {
@@ -1316,6 +1333,11 @@ impl FlowGraph {
             if self.outputs.contains(&to) {
                 self.outputs.retain(|&out| out != from && out != to);
                 self.outputs.push(from);
+            }
+
+            if let FlowVertex::LinearBlock(block) = &mut self.graph[from] {
+                // Since stores break code generation, get rid of generated stores
+                block.remove_stores();
             }
 
             self.graph.remove_node(to);
