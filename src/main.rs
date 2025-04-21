@@ -105,6 +105,28 @@ impl Display for Sym {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pat {
+    Tag(Ident, usize),
+    Array,
+    Sexp,
+    String,
+    UnBoxed,
+    Closure,
+    Boxed,
+}
+
+impl Display for Pat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Pat::Tag(t, args) => write!(f, "Tag ({t}, {args})"),
+            Pat::Array => write!(f, "Array"),
+            Pat::Sexp => write!(f, "Sexp"),
+            Pat::String => write!(f, "String"),
+            Pat::UnBoxed => write!(f, "UnBoxed"),
+            Pat::Closure => write!(f, "Closure"),
+            Pat::Boxed => write!(f, "Boxed"),
         }
     }
 }
@@ -118,7 +140,7 @@ enum LinInst {
     Store(Sym),
     Load(Sym),
     BinOp(Op),
-    Tag(Ident, usize),
+    Pat(Pat),
     SExp(Ident, usize),
     Closure(Ident, usize),
     LDA(Sym),
@@ -134,7 +156,7 @@ impl Display for LinInst {
             LinInst::Store(sym) => write!(f, "ST {sym}"),
             LinInst::Load(sym) => write!(f, "LD {sym}"),
             LinInst::BinOp(op) => write!(f, "BINOP {op}"),
-            LinInst::Tag(t, args) => write!(f, "PATT Tag ({t}, {args})"),
+            LinInst::Pat(pat) => write!(f, "PATT {pat}"),
             LinInst::SExp(t, args) => write!(f, "SEXP {t}, {args}"),
             LinInst::Dup => write!(f, "DUP"),
             LinInst::Drop => write!(f, "DROP"),
@@ -378,10 +400,21 @@ impl Inst {
             }
             "ELEM" => Some(Linear(LinInst::Elem)),
             "PATT" => {
-                let _ = tokens.next();
-                let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
-                let num = tokens.next()?.parse().ok()?;
-                Some(Linear(LinInst::Tag(tag.to_string(), num)))
+                let pat = match tokens.next()? {
+                    "Tag" => {
+                        let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
+                        let num = tokens.next()?.parse().ok()?;
+                        Some(Pat::Tag(tag.to_string(), num))
+                    }
+                    "Array" => Some(Pat::Array),
+                    "Sexp" => Some(Pat::Sexp),
+                    "Strin" => Some(Pat::String),
+                    "UnBox" => Some(Pat::UnBoxed),
+                    "Closu" => Some(Pat::Closure),
+                    "Boxed" => Some(Pat::Boxed),
+                    _ => None,
+                }?;
+                Some(Linear(LinInst::Pat(pat)))
             }
             "SEXP" => {
                 let tag = tokens.next()?.strip_prefix('\"')?.strip_suffix('\"')?;
@@ -692,7 +725,7 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
             }
             LinInst::LDA(_) => n_arity_inst(&mut dag, &mut stack, 0, inst),
             LinInst::BinOp(_) => n_arity_inst(&mut dag, &mut stack, 2, inst),
-            LinInst::Tag(_, _) => n_arity_inst(&mut dag, &mut stack, 1, inst),
+            LinInst::Pat(_) => n_arity_inst(&mut dag, &mut stack, 1, inst),
             LinInst::SExp(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::Closure(_, n) => n_arity_inst(&mut dag, &mut stack, n, inst),
             LinInst::Array(n) => n_arity_inst(&mut dag, &mut stack, n, inst),
@@ -1014,7 +1047,7 @@ impl DataGraph {
                 |edge| match (&self.dag[edge.source()], &self.dag[edge.target()]) {
                     (
                         DataVertex::OpResult(LinInst::SExp(have_tag, have_args)),
-                        DataVertex::OpResult(LinInst::Tag(expect_tag, expect_args)),
+                        DataVertex::OpResult(LinInst::Pat(Pat::Tag(expect_tag, expect_args))),
                     ) => {
                         if have_tag == expect_tag && have_args == expect_args {
                             Some((edge.target(), 1))
