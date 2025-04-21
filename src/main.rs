@@ -177,9 +177,15 @@ struct Begin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum LabelMode {
+    BeforeJmp,
+    AfterJmp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FlowInst {
     Jmp(JumpMode, Ident),
-    Label(Ident),
+    Label(Ident, LabelMode),
     // call command should be in flow graph, because it can cause
     // arbitrary change of global variables. And after unfolding it can
     // have control flow instruction which weird to extract from lin block
@@ -202,6 +208,15 @@ impl FlowInst {
     }
 }
 
+impl Display for LabelMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LabelMode::BeforeJmp => write!(f, "1"),
+            LabelMode::AfterJmp => write!(f, "0"),
+        }
+    }
+}
+
 impl Display for FlowInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -210,7 +225,7 @@ impl Display for FlowInst {
                 JumpMode::Zero => write!(f, "CJMP z, {label}"),
                 JumpMode::NonZero => write!(f, "CJMP nz, {label}"),
             },
-            FlowInst::Label(label) => write!(f, "LABEL {label}, 1"),
+            FlowInst::Label(label, mode) => write!(f, "LABEL {label}, {mode}"),
             FlowInst::Call(name, args) => write!(f, "CALL {name}, {args}"),
             FlowInst::CallC(args) => write!(f, "CALLC {args}"),
             FlowInst::STI => write!(f, "STI"),
@@ -354,7 +369,8 @@ impl Inst {
             "DROP" => Some(Linear(LinInst::Drop)),
             "LABEL" => {
                 let label = tokens.next()?.to_string();
-                Some(Flow(FlowInst::Label(label)))
+                // LabelMode from original SM code is useless
+                Some(Flow(FlowInst::Label(label, LabelMode::BeforeJmp)))
             }
             "CONST" => {
                 let value = tokens.next()?.parse().ok()?;
@@ -1471,7 +1487,7 @@ impl FlowGraph {
                             edges.push((node, label, jump_mode.into()));
                             edge_from_prev = Some((node, jump_mode.rev().into()))
                         }
-                        FlowInst::Label(label) => {
+                        FlowInst::Label(label, _) => {
                             edge_from_prev = Some((node, JumpCondition::Unconditional));
                             labeled = Some(label);
                         }
@@ -1670,10 +1686,10 @@ impl FlowGraph {
             node: NodeIndex,
             code: &mut Vec<Inst>,
             free_loc: u16,
-            provide_label: bool,
+            provide_label: Option<LabelMode>,
         ) {
-            if provide_label {
-                code.push(Inst::Flow(FlowInst::Label(flow.get_label(node))));
+            if let Some(mode) = provide_label {
+                code.push(Inst::Flow(FlowInst::Label(flow.get_label(node), mode)));
             }
 
             match &flow.graph[node] {
@@ -1708,6 +1724,19 @@ impl FlowGraph {
                 .filter(|v| !previous.iter().contains(&v.source())) // all except previously compiled node
                 .count()
                 > 0;
+
+            let label_was_known_before = flow
+                .graph
+                .edges_directed(current, Direction::Incoming)
+                .filter(|v| already_compiled.contains(&v.source()))
+                .count()
+                > 0;
+
+            let provide_label = match (provide_label, label_was_known_before) {
+                (true, true) => Some(LabelMode::AfterJmp),
+                (true, false) => Some(LabelMode::BeforeJmp),
+                _ => None,
+            };
 
             compile_vertex(flow, current, code, free_loc, provide_label);
 
@@ -1772,7 +1801,7 @@ impl FlowGraph {
             .max()
             .unwrap_or(0);
 
-        code.push(Inst::Flow(FlowInst::Label(exit_label)));
+        code.push(Inst::Flow(FlowInst::Label(exit_label, LabelMode::AfterJmp)));
         (code, self.args_count(), actual_locs, self.clos_count())
     }
 }
@@ -1821,7 +1850,7 @@ impl Unit {
             })
             .peekable();
 
-        while let Some(Flow(FlowInst::Label(name))) = code.peek() {
+        while let Some(Flow(FlowInst::Label(name, _))) = code.peek() {
             let name = name.clone();
             let code: Vec<_> = (&mut code)
                 .skip(1)
@@ -1863,7 +1892,11 @@ impl Unit {
             .sorted_by_key(|(name, _)| !name.contains("init"))
         {
             let (body, args, locs, clos) = function.compile(name);
-            code.push(Inst::Flow(FlowInst::Label(name.clone())));
+            // For functions LabelMode is useless
+            code.push(Inst::Flow(FlowInst::Label(
+                name.clone(),
+                LabelMode::AfterJmp,
+            )));
             code.push(Inst::Flow(FlowInst::Begin(Begin {
                 name: name.clone(),
                 args: args as u32,
