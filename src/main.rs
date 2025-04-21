@@ -1144,8 +1144,11 @@ impl DataGraph {
             }
 
             let used_multiple_times = dag.edges_directed(node, Direction::Outgoing).count() > 1;
-            let used_for_store_output_sym = symbolics.values().contains(&node);
             let was_saved = already_compiled.contains_key(&node);
+            let used_for_store_output_sym = symbolics
+                .iter()
+                .filter(|&(sym, node)| !matches!(&dag[*node], DataVertex::Symbolic(input) if input == sym))
+                .any(|(_, n)| *n == node);
 
             if (used_multiple_times || used_for_store_output_sym) && !was_saved {
                 let save = *free_loc;
