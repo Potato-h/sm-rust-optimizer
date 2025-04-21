@@ -1804,6 +1804,12 @@ impl FlowGraph {
         code.push(Inst::Flow(FlowInst::Label(exit_label, LabelMode::AfterJmp)));
         (code, self.args_count(), actual_locs, self.clos_count())
     }
+
+    fn has_calls(&self) -> bool {
+        self.graph
+            .node_weights()
+            .any(|n| matches!(n, FlowVertex::Call(_) | FlowVertex::CallC(_)))
+    }
 }
 
 fn write_code<W: Write>(w: &mut W, code: &[Inst]) -> fmt::Result {
@@ -1828,6 +1834,7 @@ fn gen_inline_call_prologue(label: String, args: u16, first_free_loc: u16) -> Da
 struct UnitOptimFlags {
     flow_optim: FlowOptimFlags,
     force_inline: Vec<String>,
+    passes: u32,
 }
 
 #[derive(Debug)]
@@ -1867,17 +1874,25 @@ impl Unit {
     }
 
     fn optimize(&mut self, flags: UnitOptimFlags) {
-        self.functions
-            .values_mut()
-            .for_each(|flow| flow.optimize(flags.flow_optim));
+        for _ in 0..flags.passes {
+            self.functions
+                .values_mut()
+                .for_each(|flow| flow.optimize(flags.flow_optim));
 
-        for call in flags.force_inline.iter() {
-            let call_graph = self.functions[call].clone();
+            let candidates = self.find_candidates_for_inlining();
 
-            self.functions.values_mut().for_each(|flow| {
-                flow.replace_all_calls(call, &call_graph, 1);
-                flow.optimize(flags.flow_optim);
-            });
+            for call in flags
+                .force_inline
+                .iter()
+                .chain(candidates.into_iter().as_ref())
+            {
+                let call_graph = self.functions[call].clone();
+
+                self.functions.values_mut().for_each(|flow| {
+                    flow.replace_all_calls(call, &call_graph, 1);
+                    flow.optimize(flags.flow_optim);
+                });
+            }
         }
     }
 
@@ -1908,6 +1923,14 @@ impl Unit {
         }
 
         code
+    }
+
+    fn find_candidates_for_inlining(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter(|(_, function)| !function.has_calls() && function.graph.node_count() < 10)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 }
 
@@ -2119,6 +2142,10 @@ struct Args {
     #[arg(short, long, default_value_t = 1)]
     passes: u32,
 
+    /// Try optimize flow with `passes` iterations
+    #[arg(long, default_value_t = 0)]
+    unit_passes: u32,
+
     #[arg(long, value_delimiter = ' ', num_args = 1.., default_value = None)]
     force_inline: Option<Vec<String>>,
 
@@ -2170,6 +2197,7 @@ fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
     UnitOptimFlags {
         flow_optim: flow_flags_from_args(args),
         force_inline: args.force_inline.clone().unwrap_or_default(),
+        passes: args.unit_passes,
     }
 }
 
