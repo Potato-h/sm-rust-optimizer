@@ -92,6 +92,7 @@ enum Sym {
     Arg(u16),
     Loc(u16),
     Glb(Ident),
+    Acc(u16),
 }
 
 impl Display for Sym {
@@ -100,6 +101,10 @@ impl Display for Sym {
             Sym::Arg(v) => write!(f, "arg[{v}]"),
             Sym::Loc(v) => write!(f, "loc[{v}]"),
             Sym::Glb(id) => write!(f, "{id}"),
+            Sym::Acc(v) => write!(f, "acc[{v}]"),
+        }
+    }
+}
         }
     }
 }
@@ -277,6 +282,10 @@ impl Inst {
             "loc" => {
                 let id = tokens.next()?.parse().ok()?;
                 Some(Sym::Loc(id))
+            }
+            "acc" => {
+                let id = tokens.next()?.parse().ok()?;
+                Some(Sym::Acc(id))
             }
             other => Some(Sym::Glb(other.to_string())),
         }
@@ -480,6 +489,17 @@ impl DataGraph {
             .max()
             .unwrap_or(0)
     }
+
+    fn clos_count(&self) -> u16 {
+        self.symbolics
+            .keys()
+            .filter_map(|x| match x {
+                Sym::Acc(x) => Some(x + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,7 +534,7 @@ impl From<JumpMode> for JumpCondition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DataVertex {
     Symbolic(Sym),
     StackVar(ArgStackOffset),
@@ -1208,6 +1228,7 @@ fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
         Sym::Arg(i) => Sym::Loc(first_free_loc + i),
         Sym::Loc(i) => Sym::Loc(first_free_loc + args_count + i),
         Sym::Glb(glb) => Sym::Glb(glb),
+        Sym::Acc(_) => todo!("Implement inlining of closure later"),
     }
 }
 
@@ -1232,6 +1253,14 @@ impl FlowGraph {
         self.graph
             .node_weights()
             .filter_map(|v| v.block().map(DataGraph::locs_count))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn clos_count(&self) -> u16 {
+        self.graph
+            .node_weights()
+            .filter_map(|v| v.block().map(DataGraph::clos_count))
             .max()
             .unwrap_or(0)
     }
@@ -1706,7 +1735,7 @@ impl FlowGraph {
             .unwrap_or(0);
 
         code.push(Inst::Flow(FlowInst::Label(exit_label)));
-        (code, self.args_count(), actual_locs, 0)
+        (code, self.args_count(), actual_locs, self.clos_count())
     }
 }
 
