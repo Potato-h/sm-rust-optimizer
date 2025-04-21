@@ -1242,7 +1242,9 @@ impl DataGraph {
 
         // Store all needed variables only after computations within expression
         // to avoid mess up intermediate references to variables.
-        for (sym, node) in self.symbolics.iter() {
+        for (sym, node) in self.symbolics.iter().filter(
+            |&(sym, node)| !matches!(&self.dag[*node], DataVertex::Symbolic(input) if input == sym),
+        ) {
             eprintln!("Try to find local tmp value for {sym} in {already_compiled:?}");
             let saved = already_compiled[node];
             code.extend([
