@@ -1607,10 +1607,16 @@ impl FlowGraph {
     // TODO: how to actually deal with symbolics after inlining?
     // TODO: need to insert additional linear block that will deal
     //  with passing function arguments from stack
-    fn replace_call_with_graph(&mut self, call: NodeIndex, mut replacement: FlowGraph) {
+    fn replace_call_with_graph(
+        &mut self,
+        ctx: &mut Ctx,
+        call: NodeIndex,
+        mut replacement: FlowGraph,
+    ) {
         let first_free_loc = self.loc_count();
         let call_args = replacement.args_count();
         replacement.shift_symbolics_for_inline(first_free_loc);
+        replacement.shift_labels_for_inline(ctx);
 
         let prev_input = replacement.input;
         let prologue = gen_inline_call_prologue("prologue".to_string(), call_args, first_free_loc);
@@ -1626,7 +1632,13 @@ impl FlowGraph {
         self.replace_node_with_graph(call, &replacement);
     }
 
-    fn replace_all_calls(&mut self, call: &str, replacement: &FlowGraph, mut unfold_limit: u32) {
+    fn replace_all_calls(
+        &mut self,
+        ctx: &mut Ctx,
+        call: &str,
+        replacement: &FlowGraph,
+        mut unfold_limit: u32,
+    ) {
         let expect_args = replacement.args_count();
 
         while let Some(node) = self.graph.node_references().find_map(|(id, v)| match v {
@@ -1643,7 +1655,7 @@ impl FlowGraph {
                 break;
             }
 
-            self.replace_call_with_graph(node, replacement.clone());
+            self.replace_call_with_graph(ctx, node, replacement.clone());
             unfold_limit -= 1;
         }
     }
@@ -1654,6 +1666,20 @@ impl FlowGraph {
         for node in self.graph.node_weights_mut() {
             if let FlowVertex::LinearBlock(block) = node {
                 block.shift_symbolics_for_inline(first_free_loc, args);
+            }
+        }
+    }
+
+    fn shift_labels_for_inline(&mut self, ctx: &mut Ctx) {
+        for node in self.graph.node_weights_mut() {
+            let label = ctx.fresh_label();
+
+            match node {
+                FlowVertex::LinearBlock(block) => block.start_label = label,
+                FlowVertex::Call(call) => call.label = label,
+                FlowVertex::STI(sti) => sti.label = label,
+                FlowVertex::STA(sta) => sta.label = label,
+                FlowVertex::CallC(call_c) => call_c.label = label,
             }
         }
     }
@@ -1989,7 +2015,7 @@ impl Unit {
         }
     }
 
-    fn optimize(&mut self, flags: UnitOptimFlags) {
+    fn optimize(&mut self, ctx: &mut Ctx, flags: UnitOptimFlags) {
         for _ in 0..flags.passes {
             self.functions
                 .values_mut()
@@ -2005,7 +2031,7 @@ impl Unit {
                 let call_graph = self.functions[call].clone();
 
                 self.functions.values_mut().for_each(|flow| {
-                    flow.replace_all_calls(call, &call_graph, 1);
+                    flow.replace_all_calls(ctx, call, &call_graph, 1);
                     flow.optimize(flags.flow_optim);
                 });
             }
@@ -2331,7 +2357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let code = parse_stack_code(&content);
     let mut ctx = Ctx::default();
     let mut unit = Unit::analyze(&mut ctx, code.into_iter());
-    unit.optimize(flags);
+    unit.optimize(&mut ctx, flags);
 
     if let Some(out_dir) = args.graphs_dir {
         for (name, flow_graph) in unit.functions.iter() {
