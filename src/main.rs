@@ -1832,9 +1832,37 @@ impl FlowGraph {
             .any(|n| matches!(n, FlowVertex::Call(_) | FlowVertex::CallC(_)))
     }
 
+    fn all_symbolics(&self) -> BTreeSet<Sym> {
+        self.graph
+            .node_weights()
+            .filter_map(|v| match v {
+                // TODO: probably only need to collect input symbolics?
+                FlowVertex::LinearBlock(block) => Some(block.symbolics.keys()),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    // TODO: precise analysis of CALLs
+    // TODO: precise analysis of STA and STI
     fn find_read_symbolics(&self) -> BTreeMap<NodeIndex, BTreeSet<Sym>> {
         let mut read_syms = BTreeMap::new();
-        let mut visited = BTreeSet::new();
+        let all_symbolics = self.all_symbolics();
+
+        // symbolic variables that needed to be preserved across function calls
+        // does not need to preserve Acc and Arg, because only way to modify them
+        // is to call STA, but it's already a separate vertex can not be deleted
+        let globals: BTreeSet<_> = all_symbolics
+            .iter()
+            .filter(|v| matches!(v, Sym::Glb(_)))
+            .cloned()
+            .collect();
+
+        for &output in self.outputs.iter() {
+            read_syms.insert(output, globals.clone());
+        }
 
         // FIXME: this is wrong for many reasons
         // 1) cycles breaks this approach (SCC or known liveness analysis can solve this)
@@ -1846,26 +1874,28 @@ impl FlowGraph {
             node: NodeIndex,
             visited: &mut BTreeSet<NodeIndex>,
             read_syms: &mut BTreeMap<NodeIndex, BTreeSet<Sym>>,
+            all_symbolics: &BTreeSet<Sym>,
         ) {
             visited.insert(node);
 
-            let syms = flow.graph[node]
-                .block()
-                .into_iter()
-                .flat_map(|block| {
-                    block.inputs.iter().filter_map(|&v| match &block.dag[v] {
+            let syms = match &flow.graph[node] {
+                FlowVertex::LinearBlock(block) => block
+                    .inputs
+                    .iter()
+                    .filter_map(|&v| match &block.dag[v] {
                         DataVertex::Symbolic(sym) => Some(sym.clone()),
                         _ => None,
                     })
-                })
-                .collect();
+                    .collect(),
+                _ => all_symbolics.clone(),
+            };
 
-            read_syms.insert(node, syms);
+            read_syms.entry(node).or_default().extend(syms);
 
             // TODO: use new disjoin API on BTreeMap
             for target in flow.graph.neighbors_directed(node, Direction::Outgoing) {
                 if !visited.contains(&target) {
-                    dfs(flow, target, visited, read_syms);
+                    dfs(flow, target, visited, read_syms, all_symbolics);
                 }
 
                 let ext = read_syms[&target].iter().cloned().collect_vec();
@@ -1876,7 +1906,11 @@ impl FlowGraph {
             }
         }
 
-        dfs(self, self.input, &mut visited, &mut read_syms);
+        let mut visited = BTreeSet::new();
+        for node in self.graph.node_indices() {
+            visited.clear();
+            dfs(self, node, &mut visited, &mut read_syms, &all_symbolics);
+        }
 
         read_syms
     }
@@ -2265,7 +2299,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             jump_on_const: true,
             data_flags,
             merge_blocks: true,
-            liveliness_analysis: false,
+            liveliness_analysis: true,
             passes: args.passes,
         }
     } else {
