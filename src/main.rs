@@ -298,6 +298,7 @@ struct FlowOptimFlags {
     elim_dead_code: bool,
     jump_on_const: bool,
     merge_blocks: bool,
+    liveliness_analysis: bool,
     data_flags: DataGraphOptimFlags,
     passes: u32,
 }
@@ -1275,6 +1276,19 @@ impl DataGraph {
 
         code
     }
+
+    fn remove_stores_to_unused_symbolics(&mut self, read_symbolics: &BTreeSet<Sym>) {
+        let symbolics_to_delete = self
+            .symbolics
+            .keys()
+            .filter(|k| !read_symbolics.contains(k))
+            .cloned()
+            .collect_vec();
+
+        for sym in symbolics_to_delete {
+            self.symbolics.remove(&sym);
+        }
+    }
 }
 
 fn sym_shift(sym: Sym, first_free_loc: u16, args_count: u16) -> Sym {
@@ -1447,6 +1461,10 @@ impl FlowGraph {
             if flow_optim.merge_blocks {
                 self.merge_block_with_unconditional_jump();
             }
+
+            if flow_optim.liveliness_analysis {
+                self.remove_unused_symbolics();
+            }
         }
     }
 
@@ -1613,7 +1631,10 @@ impl FlowGraph {
 
         while let Some(node) = self.graph.node_references().find_map(|(id, v)| match v {
             FlowVertex::Call(call_v) if call_v.name == call => {
-                assert_eq!(call_v.args as u16, expect_args);
+                assert_eq!(
+                    call_v.args as u16, expect_args,
+                    "while inlining {call}, number of arguments mismatch"
+                );
                 Some(id)
             }
             _ => None,
@@ -1809,6 +1830,67 @@ impl FlowGraph {
         self.graph
             .node_weights()
             .any(|n| matches!(n, FlowVertex::Call(_) | FlowVertex::CallC(_)))
+    }
+
+    fn find_read_symbolics(&self) -> BTreeMap<NodeIndex, BTreeSet<Sym>> {
+        let mut read_syms = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+
+        // FIXME: this is wrong for many reasons
+        // 1) cycles breaks this approach (SCC or known liveness analysis can solve this)
+        // 2) it doesn't respect CALL, CALLC, STI and STA
+        // 3) may need an interval (or more complex structure) for each symbolic variable,
+        // not variables for each flow node
+        fn dfs(
+            flow: &FlowGraph,
+            node: NodeIndex,
+            visited: &mut BTreeSet<NodeIndex>,
+            read_syms: &mut BTreeMap<NodeIndex, BTreeSet<Sym>>,
+        ) {
+            visited.insert(node);
+
+            let syms = flow.graph[node]
+                .block()
+                .into_iter()
+                .flat_map(|block| {
+                    block.inputs.iter().filter_map(|&v| match &block.dag[v] {
+                        DataVertex::Symbolic(sym) => Some(sym.clone()),
+                        _ => None,
+                    })
+                })
+                .collect();
+
+            read_syms.insert(node, syms);
+
+            // TODO: use new disjoin API on BTreeMap
+            for target in flow.graph.neighbors_directed(node, Direction::Outgoing) {
+                if !visited.contains(&target) {
+                    dfs(flow, target, visited, read_syms);
+                }
+
+                let ext = read_syms[&target].iter().cloned().collect_vec();
+
+                if let Some(syms) = read_syms.get_mut(&node) {
+                    syms.extend(ext);
+                }
+            }
+        }
+
+        dfs(self, self.input, &mut visited, &mut read_syms);
+
+        read_syms
+    }
+
+    // TODO: is this `nodes` allocation really needed?
+    fn remove_unused_symbolics(&mut self) {
+        let read_symbolics = self.find_read_symbolics();
+        let nodes = self.graph.node_indices().collect_vec();
+
+        for node in nodes {
+            if let FlowVertex::LinearBlock(block) = &mut self.graph[node] {
+                block.remove_stores_to_unused_symbolics(&read_symbolics[&node]);
+            }
+        }
     }
 }
 
@@ -2122,6 +2204,9 @@ struct Args {
     #[arg(long, default_value_t = true)]
     elim_stores: bool,
 
+    #[arg(long, default_value_t = false)]
+    liveliness_analysis: bool,
+
     /// Propagate constant
     #[arg(short, long, default_value_t = false)]
     const_prop: bool,
@@ -2180,6 +2265,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             jump_on_const: true,
             data_flags,
             merge_blocks: true,
+            liveliness_analysis: false,
             passes: args.passes,
         }
     } else {
@@ -2189,6 +2275,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             data_flags,
             merge_blocks: args.merge_blocks,
             passes: args.passes,
+            liveliness_analysis: args.liveliness_analysis,
         }
     }
 }
