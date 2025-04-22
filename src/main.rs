@@ -299,6 +299,7 @@ struct FlowOptimFlags {
     jump_on_const: bool,
     merge_blocks: bool,
     liveliness_analysis: bool,
+    tail_call: bool,
     data_flags: DataGraphOptimFlags,
     passes: u32,
 }
@@ -1772,6 +1773,7 @@ impl FlowGraph {
                 .count()
                 > 0;
 
+            // FIXME: it's wrong way to compute mode with tail calls
             let label_was_known_before = flow
                 .graph
                 .edges_directed(current, Direction::Incoming)
@@ -1952,6 +1954,46 @@ impl FlowGraph {
             }
         }
     }
+
+    fn strip_empty_output_nodes(&mut self) {
+        while let Some((i, node)) = self
+            .outputs
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|&(_, v)| matches!(&self.graph[v], FlowVertex::LinearBlock(block) if block.dag.node_count() == 0))
+            .find(|&(_, v)| self.graph.edges_directed(v, Direction::Incoming).all(|e| !e.weight().is_conditional()))
+        {
+            self.outputs.swap_remove(i);
+
+            for incoming in self.graph.neighbors_directed(node, Direction::Incoming) {
+                self.outputs.push(incoming);
+            }
+
+            self.graph.remove_node(node);
+        }
+    }
+
+    fn replace_tail_call(&mut self, call: &str) {
+        while let Some((i, node, label, args)) =
+            self.outputs
+                .iter()
+                .cloned()
+                .enumerate()
+                .find_map(|(i, v)| match &self.graph[v] {
+                    FlowVertex::Call(call_v) if call_v.name == call => {
+                        Some((i, v, call_v.label.clone(), call_v.args))
+                    }
+                    _ => None,
+                })
+        {
+            let replacement = gen_tail_call_prologue(label, args as u16);
+            *(&mut self.graph[node]) = FlowVertex::LinearBlock(replacement);
+            self.outputs.swap_remove(i);
+            self.graph
+                .add_edge(node, self.input, JumpCondition::Unconditional);
+        }
+    }
 }
 
 fn write_code<W: Write>(w: &mut W, code: &[Inst]) -> fmt::Result {
@@ -1971,6 +2013,15 @@ fn gen_inline_call_prologue(label: String, args: u16, first_free_loc: u16) -> Da
         .collect_vec();
 
     analyze_lin_block(label, inst, false)
+}
+
+fn gen_tail_call_prologue(label: Label, args: u16) -> DataGraph {
+    let code = (0..args)
+        .rev()
+        .flat_map(|i| [LinInst::Store(Sym::Arg(i)), LinInst::Drop])
+        .collect_vec();
+
+    analyze_lin_block(label, code, false)
 }
 
 struct UnitOptimFlags {
@@ -2034,6 +2085,14 @@ impl Unit {
                     flow.replace_all_calls(ctx, call, &call_graph, 1);
                     flow.optimize(flags.flow_optim);
                 });
+            }
+
+            // TODO: move to FlowGraph::optimize?
+            if flags.flow_optim.tail_call {
+                for (name, function) in self.functions.iter_mut() {
+                    function.strip_empty_output_nodes();
+                    function.replace_tail_call(&name);
+                }
             }
         }
     }
@@ -2275,6 +2334,9 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     tag_check_eval: bool,
 
+    #[arg(long, default_value_t = false)]
+    tail_call: bool,
+
     /// Replace conditional jump on constant with unconditional jump
     #[arg(short, long, default_value_t = false)]
     jump_on_const: bool,
@@ -2327,6 +2389,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             merge_blocks: true,
             liveliness_analysis: true,
             passes: args.passes,
+            tail_call: true,
         }
     } else {
         FlowOptimFlags {
@@ -2336,6 +2399,7 @@ fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
             merge_blocks: args.merge_blocks,
             passes: args.passes,
             liveliness_analysis: args.liveliness_analysis,
+            tail_call: args.tail_call,
         }
     }
 }
