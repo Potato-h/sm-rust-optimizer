@@ -788,14 +788,17 @@ fn analyze_lin_block(start_label: String, code: Vec<LinInst>, has_cjmp: bool) ->
         "found cycle in data flow graph"
     );
 
-    DataGraph {
+    let mut graph = DataGraph {
         start_label,
         dag,
         inputs,
         outputs: stack,
         symbolics,
         jump_decided_by,
-    }
+    };
+
+    graph.remove_stores();
+    graph
 }
 
 /// Insert graph `extend` into graph `source` and return mapping of old `extend` indexes
@@ -829,6 +832,34 @@ where
 }
 
 impl DataGraph {
+    fn check_invariants(&self) {
+        for input in self.inputs.iter() {
+            assert!(
+                self.dag.contains_node(*input),
+                "input node in data graph must be alive"
+            );
+        }
+
+        for output in self.outputs.stack.iter() {
+            assert!(
+                self.dag.contains_node(*output),
+                "output node in data graph must be alive"
+            );
+        }
+
+        for jump in self.jump_decided_by.iter() {
+            assert!(
+                self.dag.contains_node(*jump),
+                "jump node in data graph must be alive"
+            );
+        }
+
+        assert!(
+            !algo::is_cyclic_directed(&self.dag),
+            "found cycle in data flow graph"
+        );
+    }
+
     fn extend(&mut self, ext: &DataGraph) {
         assert!(self.jump_decided_by.is_none());
 
@@ -901,7 +932,7 @@ impl DataGraph {
         }
 
         self.jump_decided_by = ext.jump_decided_by.as_ref().map(|&id| ext_to_source(id));
-        assert!(!algo::is_cyclic_directed(&self.dag));
+        self.check_invariants();
     }
 
     fn remove_jump_decision(&mut self) {
@@ -931,7 +962,9 @@ impl DataGraph {
                 .collect_vec();
 
             // this loop must have exactly one iteration
-            for from in store_source {
+            for (i, from) in store_source.into_iter().enumerate() {
+                assert!(i == 0, "this loop must have exactly one iteration");
+
                 for (to, w) in store_usages.iter().cloned() {
                     self.dag.add_edge(from, to, w);
                 }
@@ -941,6 +974,8 @@ impl DataGraph {
 
             self.dag.remove_node(store);
         }
+
+        self.check_invariants();
     }
 
     // NOTE: is removal of input node breaks relation of block? probably not,
@@ -981,17 +1016,16 @@ impl DataGraph {
             self.dag.remove_node(sink);
             self.inputs.retain(|&x| x != sink);
         }
+
+        self.check_invariants();
     }
 
     fn change_output_state(&mut self, node: NodeIndex, new_node: NodeIndex) {
-        if let Some((i, _)) = self
-            .outputs
+        self.outputs
             .stack
-            .iter()
-            .find_position(|&&out_node| out_node == node)
-        {
-            self.outputs.stack[i] = new_node;
-        }
+            .iter_mut()
+            .filter(|out_node| **out_node == node)
+            .for_each(|out_node| *out_node = new_node);
 
         if self.jump_decided_by.is_some_and(|jmp| jmp == node) {
             self.jump_decided_by = Some(new_node);
@@ -1001,6 +1035,8 @@ impl DataGraph {
             .values_mut()
             .filter(|s| **s == node)
             .for_each(|s| *s = new_node);
+
+        self.check_invariants();
     }
 
     /// Replace node with new value and saves *only* outgoing edges from this node.
@@ -1021,6 +1057,7 @@ impl DataGraph {
 
         self.change_output_state(node, new_node);
         self.dag.remove_node(node);
+        self.check_invariants();
         new_node
     }
 
@@ -1055,6 +1092,8 @@ impl DataGraph {
             let value = op.eval(lhs, rhs);
             self.replace_node_for_outgoings(node, DataVertex::OpResult(LinInst::Const(value)));
         }
+
+        self.check_invariants();
     }
 
     fn tag_check_evaluation(&mut self) {
@@ -1080,6 +1119,8 @@ impl DataGraph {
         {
             self.replace_node_for_outgoings(node, DataVertex::OpResult(LinInst::Const(new_value)));
         }
+
+        self.check_invariants();
     }
 
     fn optimize(&mut self, flags: DataGraphOptimFlags) {
