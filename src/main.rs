@@ -1604,10 +1604,6 @@ impl FlowGraph {
     fn replace_node_with_graph(&mut self, node: NodeIndex, replacement: &FlowGraph) {
         assert_ne!(self.input, node, "Can't replace input node with graph");
 
-        for &out in self.outputs.iter() {
-            assert_ne!(out, node, "Can't replace output node with graph");
-        }
-
         for edge in self.graph.edges_directed(node, Direction::Outgoing) {
             assert_eq!(
                 *edge.weight(),
@@ -1641,6 +1637,16 @@ impl FlowGraph {
             for to in outgoings.iter() {
                 self.graph.add_edge(out, *to, JumpCondition::Unconditional);
             }
+        }
+
+        if let Some((i, _)) = self.outputs.iter().find_position(|&&v| node == v) {
+            self.outputs.swap_remove(i);
+            self.outputs.extend(
+                replacement
+                    .outputs
+                    .iter()
+                    .map(|out| replacement_remapping[out]),
+            );
         }
 
         self.graph.remove_node(node);
