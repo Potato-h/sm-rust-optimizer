@@ -1667,7 +1667,7 @@ impl FlowGraph {
         replacement.shift_labels_for_inline(ctx);
 
         let prev_input = replacement.input;
-        let prologue = gen_inline_call_prologue("prologue".to_string(), call_args, first_free_loc);
+        let prologue = gen_inline_call_prologue(ctx.fresh_label(), call_args, first_free_loc);
         let input = replacement
             .graph
             .add_node(FlowVertex::LinearBlock(prologue));
