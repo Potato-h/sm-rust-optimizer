@@ -592,6 +592,16 @@ enum DataVertex {
     OpResult(LinInst),
 }
 
+impl Display for DataVertex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataVertex::Symbolic(sym) => write!(f, "{sym}"),
+            DataVertex::StackVar(offset) => write!(f, "StackVar({offset})"),
+            DataVertex::OpResult(inst) => write!(f, "{inst}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VirtualStack {
     tail_from: usize,
@@ -2300,6 +2310,24 @@ where
     }
 }
 
+struct SepByComma<'a, T>(&'a [T]);
+
+impl<T: Display> Display for SepByComma<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.0.iter();
+
+        if let Some(v) = iter.next() {
+            write!(f, "{v}")?;
+        }
+
+        for v in iter {
+            write!(f, ", {v}")?;
+        }
+
+        Ok(())
+    }
+}
+
 fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result {
     writeln!(w, "subgraph cluster_{label} {{")?;
     writeln!(w, "label = \"{}\";", graph.info_label())?;
@@ -2327,8 +2355,9 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
         write!(w, "sub{label}{} [label = \"", node.index(),)?;
         write!(
             Escaper(&mut *w),
-            "{:?}; {node_symbolics:?}",
-            &graph.dag[node]
+            "{}; [{}]",
+            &graph.dag[node],
+            SepByComma(node_symbolics.as_slice())
         )?;
         writeln!(
             w,
@@ -2358,44 +2387,15 @@ fn subgraph<W: Write>(w: &mut W, label: &str, graph: &DataGraph) -> fmt::Result 
     Ok(())
 }
 
-fn call_subgraph<W: Write>(w: &mut W, label: &str, name: &str, args: usize) -> fmt::Result {
+fn single_node_subgraph<W: Write>(
+    w: &mut W,
+    label: &str,
+    content: impl FnOnce(&mut W) -> fmt::Result,
+) -> fmt::Result {
     writeln!(w, "subgraph cluster_{label} {{")?;
-    writeln!(w, "label = \"call ({}, {})\";", name, args)?;
-    writeln!(w, "style = filled;")?;
-    writeln!(w, "color = lightgrey;")?;
-    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
-    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
-    writeln!(w, "}}")?;
-    Ok(())
-}
-
-fn callc_subgraph<W: Write>(w: &mut W, label: &str, args: usize) -> fmt::Result {
-    writeln!(w, "subgraph cluster_{label} {{")?;
-    writeln!(w, "label = \"callc {}\";", args)?;
-    writeln!(w, "style = filled;")?;
-    writeln!(w, "color = lightgrey;")?;
-    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
-    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
-    writeln!(w, "}}")?;
-    Ok(())
-}
-
-fn sti_subgraph<W: Write>(w: &mut W, label: &str) -> fmt::Result {
-    writeln!(w, "subgraph cluster_{label} {{")?;
-    writeln!(w, "label = \"STI\";")?;
-    writeln!(w, "style = filled;")?;
-    writeln!(w, "color = lightgrey;")?;
-    writeln!(w, "sub{label}_input [shape = point style = invis];")?;
-    writeln!(w, "sub{label}_output [shape = point style = invis];")?;
-    writeln!(w, "}}")?;
-    Ok(())
-}
-
-fn sta_subgraph<W: Write>(w: &mut W, label: &str) -> fmt::Result {
-    writeln!(w, "subgraph cluster_{label} {{")?;
-    writeln!(w, "label = \"STA\";")?;
-    writeln!(w, "style = filled;")?;
-    writeln!(w, "color = lightgrey;")?;
+    write!(w, "label = \"")?;
+    content(w)?;
+    writeln!(w, "\";")?;
     writeln!(w, "sub{label}_input [shape = point style = invis];")?;
     writeln!(w, "sub{label}_output [shape = point style = invis];")?;
     writeln!(w, "}}")?;
@@ -2411,10 +2411,14 @@ fn function_graph<W: Write>(w: &mut W, flow: &FlowGraph) -> fmt::Result {
         let label = block.index().to_string();
         match &flow.graph[block] {
             FlowVertex::LinearBlock(graph) => subgraph(w, &label, graph)?,
-            FlowVertex::Call(call) => call_subgraph(w, &label, &call.name, call.args)?,
-            FlowVertex::STI(_) => sti_subgraph(w, &label)?,
-            FlowVertex::STA(_) => sta_subgraph(w, &label)?,
-            FlowVertex::CallC(callc) => callc_subgraph(w, &label, callc.args)?,
+            FlowVertex::Call(call) => single_node_subgraph(w, &label, |w| {
+                write!(w, "CALL {}, {}", call.name, call.args)
+            })?,
+            FlowVertex::STI(_) => single_node_subgraph(w, &label, |w| write!(w, "STI"))?,
+            FlowVertex::STA(_) => single_node_subgraph(w, &label, |w| write!(w, "STA"))?,
+            FlowVertex::CallC(callc) => {
+                single_node_subgraph(w, &label, |w| write!(w, "CALLC {}", callc.args))?
+            }
         }
     }
 
