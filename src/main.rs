@@ -2087,6 +2087,7 @@ fn gen_tail_call_prologue(label: Label, args: u16) -> DataGraph {
 struct UnitOptimFlags {
     flow_optim: FlowOptimFlags,
     force_inline: Vec<String>,
+    inline_strategy: bool,
     passes: u32,
 }
 
@@ -2132,7 +2133,11 @@ impl Unit {
                 .values_mut()
                 .for_each(|flow| flow.optimize(flags.flow_optim));
 
-            let candidates = self.find_candidates_for_inlining();
+            let candidates = if flags.inline_strategy {
+                self.find_candidates_for_inlining()
+            } else {
+                Vec::new()
+            };
 
             for call in flags
                 .force_inline
@@ -2397,6 +2402,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     tail_call: bool,
 
+    #[arg(long, default_value_t = false)]
+    inline_strategy: bool,
+
     /// Replace conditional jump on constant with unconditional jump
     #[arg(short, long, default_value_t = false)]
     jump_on_const: bool,
@@ -2469,6 +2477,7 @@ fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
         flow_optim: flow_flags_from_args(args),
         force_inline: args.force_inline.clone().unwrap_or_default(),
         passes: args.unit_passes,
+        inline_strategy: args.inline_strategy || args.optim_full,
     }
 }
 
