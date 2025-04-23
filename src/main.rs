@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Display, Write};
 use std::fs::{self, File};
@@ -2054,6 +2054,28 @@ impl FlowGraph {
                 .add_edge(node, self.input, JumpCondition::Unconditional);
         }
     }
+
+    fn find_used_decls(&self) -> BTreeSet<Ident> {
+        let mut decls = BTreeSet::new();
+
+        for node in self.graph.node_weights() {
+            match node {
+                FlowVertex::LinearBlock(block) => {
+                    for node in block.dag.node_weights() {
+                        if let DataVertex::OpResult(LinInst::Closure(name, _)) = node {
+                            decls.insert(name.clone());
+                        }
+                    }
+                }
+                FlowVertex::Call(call) => {
+                    decls.insert(call.name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        decls
+    }
 }
 
 fn write_code<W: Write>(w: &mut W, code: &[Inst]) -> fmt::Result {
@@ -2088,6 +2110,7 @@ struct UnitOptimFlags {
     flow_optim: FlowOptimFlags,
     force_inline: Vec<String>,
     inline_strategy: bool,
+    remove_unused_decls: bool,
     passes: u32,
 }
 
@@ -2159,6 +2182,10 @@ impl Unit {
                     function.replace_tail_call(&name);
                 }
             }
+
+            if flags.remove_unused_decls {
+                self.remove_unused_decls();
+            }
         }
     }
 
@@ -2191,12 +2218,57 @@ impl Unit {
         code
     }
 
-    fn find_candidates_for_inlining(&self) -> Vec<String> {
+    fn find_candidates_for_inlining(&self) -> Vec<Ident> {
         self.functions
             .iter()
             .filter(|(_, function)| !function.has_calls() && function.graph.node_count() < 10)
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    fn find_used_decls(&self) -> BTreeSet<Ident> {
+        let mut queue: VecDeque<_> = self
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Public(Public::Fun(name, _, _)) => Some(name.clone()),
+                _ => None,
+            })
+            .chain(
+                self.functions
+                    .keys()
+                    .filter(|name| name.contains("init"))
+                    .cloned(),
+            )
+            .collect();
+
+        let mut used_decls: BTreeSet<_> = queue.iter().cloned().collect();
+
+        while let Some(decl) = queue.pop_front() {
+            if let Some(flow) = self.functions.get(&decl) {
+                let mut additional_decls = flow.find_used_decls();
+                for decl in additional_decls.iter() {
+                    if !used_decls.contains(decl) {
+                        queue.push_back(decl.clone());
+                    }
+                }
+
+                used_decls.append(&mut additional_decls);
+            }
+        }
+
+        used_decls
+    }
+
+    fn remove_unused_decls(&mut self) {
+        let used_decls = self.find_used_decls();
+
+        self.functions = mem::take(&mut self.functions)
+            .into_iter()
+            .filter(|(k, _)| used_decls.contains(k))
+            .collect();
+
+        eprintln!("actually used decls: {used_decls:?}");
     }
 }
 
@@ -2405,6 +2477,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     inline_strategy: bool,
 
+    #[arg(long, default_value_t = false)]
+    remove_unused_decls: bool,
+
     /// Replace conditional jump on constant with unconditional jump
     #[arg(short, long, default_value_t = false)]
     jump_on_const: bool,
@@ -2478,6 +2553,7 @@ fn unit_flags_from_args(args: &Args) -> UnitOptimFlags {
         force_inline: args.force_inline.clone().unwrap_or_default(),
         passes: args.unit_passes,
         inline_strategy: args.inline_strategy || args.optim_full,
+        remove_unused_decls: args.remove_unused_decls || args.optim_full,
     }
 }
 
