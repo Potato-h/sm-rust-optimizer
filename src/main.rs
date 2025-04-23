@@ -178,8 +178,8 @@ struct Begin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LabelMode {
-    BeforeJmp,
-    AfterJmp,
+    DropBarrier,
+    RetrieveStack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,8 +211,8 @@ impl FlowInst {
 impl Display for LabelMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LabelMode::BeforeJmp => write!(f, "1"),
-            LabelMode::AfterJmp => write!(f, "0"),
+            LabelMode::DropBarrier => write!(f, "1"),
+            LabelMode::RetrieveStack => write!(f, "0"),
         }
     }
 }
@@ -372,7 +372,7 @@ impl Inst {
             "LABEL" => {
                 let label = tokens.next()?.to_string();
                 // LabelMode from original SM code is useless
-                Some(Flow(FlowInst::Label(label, LabelMode::BeforeJmp)))
+                Some(Flow(FlowInst::Label(label, LabelMode::DropBarrier)))
             }
             "CONST" => {
                 let value = tokens.next()?.parse().ok()?;
@@ -1828,9 +1828,19 @@ impl FlowGraph {
                 .count()
                 > 0;
 
-            let provide_label = match (provide_label, label_was_known_before) {
-                (true, true) => Some(LabelMode::AfterJmp),
-                (true, false) => Some(LabelMode::BeforeJmp),
+            let previous_jump_on_current = previous
+                .iter()
+                .flat_map(|&p| flow.graph.edges_directed(p, Direction::Outgoing))
+                .any(|e| e.target() == current);
+
+            let provide_label = match (
+                provide_label,
+                label_was_known_before,
+                previous_jump_on_current,
+            ) {
+                (true, true, _) => Some(LabelMode::RetrieveStack),
+                (true, _, false) => Some(LabelMode::RetrieveStack),
+                (true, false, _) => Some(LabelMode::DropBarrier),
                 _ => None,
             };
 
@@ -1897,7 +1907,10 @@ impl FlowGraph {
             .max()
             .unwrap_or(0);
 
-        code.push(Inst::Flow(FlowInst::Label(exit_label, LabelMode::AfterJmp)));
+        code.push(Inst::Flow(FlowInst::Label(
+            exit_label,
+            LabelMode::RetrieveStack,
+        )));
         (code, self.args_count(), actual_locs, self.clos_count())
     }
 
@@ -2158,7 +2171,7 @@ impl Unit {
             // For functions LabelMode is useless
             code.push(Inst::Flow(FlowInst::Label(
                 name.clone(),
-                LabelMode::AfterJmp,
+                LabelMode::RetrieveStack,
             )));
             code.push(Inst::Flow(FlowInst::Begin(Begin {
                 name: name.clone(),
