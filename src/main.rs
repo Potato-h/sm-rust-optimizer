@@ -2457,9 +2457,11 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     elim_dead_code: bool,
 
+    /// Do not generate separate store node in data graph
     #[arg(long, default_value_t = true)]
     elim_stores: bool,
 
+    /// Delete unused stores
     #[arg(long, default_value_t = false)]
     liveliness_analysis: bool,
 
@@ -2471,12 +2473,16 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     tag_check_eval: bool,
 
+    /// Loop function body if output node in flow graph
+    /// is recursive call
     #[arg(long, default_value_t = false)]
     tail_call: bool,
 
+    /// Enable automatic inline function detection
     #[arg(long, default_value_t = false)]
     inline_strategy: bool,
 
+    /// Remove unused declarations
     #[arg(long, default_value_t = false)]
     remove_unused_decls: bool,
 
@@ -2496,54 +2502,35 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     unit_passes: u32,
 
+    /// Forcefully try to inline following functions
     #[arg(long, value_delimiter = ' ', num_args = 1.., default_value = None)]
     force_inline: Option<Vec<String>>,
 
+    /// Set all optimizations flags listed above
     #[arg(short = 'O', long, default_value_t = false)]
     optim_full: bool,
 }
 
 fn data_flags_from_args(args: &Args) -> DataGraphOptimFlags {
-    if args.optim_full {
-        DataGraphOptimFlags {
-            elim_dead_code: true,
-            const_prop: true,
-            tag_eval: true,
-            elim_stores: true,
-        }
-    } else {
-        DataGraphOptimFlags {
-            elim_dead_code: args.elim_dead_code,
-            const_prop: args.const_prop,
-            tag_eval: args.tag_check_eval,
-            elim_stores: args.elim_stores,
-        }
+    DataGraphOptimFlags {
+        elim_dead_code: args.elim_dead_code || args.optim_full,
+        const_prop: args.const_prop || args.optim_full,
+        tag_eval: args.tag_check_eval || args.optim_full,
+        elim_stores: args.elim_stores || args.optim_full,
     }
 }
 
 fn flow_flags_from_args(args: &Args) -> FlowOptimFlags {
     let data_flags = data_flags_from_args(args);
 
-    if args.optim_full {
-        FlowOptimFlags {
-            elim_dead_code: true,
-            jump_on_const: true,
-            data_flags,
-            merge_blocks: true,
-            liveliness_analysis: true,
-            passes: args.passes,
-            tail_call: true,
-        }
-    } else {
-        FlowOptimFlags {
-            elim_dead_code: args.elim_dead_code,
-            jump_on_const: args.jump_on_const,
-            data_flags,
-            merge_blocks: args.merge_blocks,
-            passes: args.passes,
-            liveliness_analysis: args.liveliness_analysis,
-            tail_call: args.tail_call,
-        }
+    FlowOptimFlags {
+        elim_dead_code: args.elim_dead_code || args.optim_full,
+        jump_on_const: args.jump_on_const || args.optim_full,
+        data_flags,
+        merge_blocks: args.merge_blocks || args.optim_full,
+        passes: args.passes,
+        liveliness_analysis: args.liveliness_analysis || args.optim_full,
+        tail_call: args.tail_call || args.optim_full,
     }
 }
 
